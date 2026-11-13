@@ -1,7 +1,7 @@
 {
   "id": "omega-connect",
   "name": "Tool connections",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "contract": "0.2",
   "description": "Connects outside tools (MCP servers first) so minds can use them, with writes approved by a person.",
   "module": "program.py",

@@ -95,6 +95,21 @@ def test_a_call_running_past_the_stop_grace_fails_at_once(program, engine, monke
     assert cut.value.kind == "connection" and "may already have taken effect" in cut.value.message
 
 
+def test_a_call_goes_out_only_on_the_definition_it_was_checked_against(program, engine):
+    """With `expect`, nothing is sent unless the session still has that definition of the tool."""
+    s = spec(program)
+    worker = asyncio.run(engine.connect("sw", s))
+    with pytest.raises(program.engine_mod.EngineError) as changed:
+        asyncio.run(engine.call("sw", s, "create_note", {"title": "a", "text": "b"}, retry_on_drop=False,
+                                expect="sha256:" + "0" * 64))
+    assert changed.value.kind == "tool_changed"
+    assert call(engine, s, "list_notes").text == "(no notes)"
+    digest = worker.tools["create_note"].digest
+    assert digest.startswith("sha256:") and digest != worker.tools["delete_notes"].digest
+    assert asyncio.run(engine.call("sw", s, "create_note", {"title": "a", "text": "b"}, retry_on_drop=False,
+                                   expect=digest)).text == "saved 'a'"
+
+
 def test_call_timeout(program, engine):
     s = spec(program, timeout=1)
     with pytest.raises(Exception):

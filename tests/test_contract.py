@@ -16,8 +16,8 @@ from fakehive import APP_ID, FakeHive, run
 
 CONTRACT_DIR = ROOT.parent / "omegahive-app-contract-04fc3f2"
 SWARM = "contract"  # its own swarm: the shared engine still holds other tests' "s1" servers
-PERSON = "person:ada"
-MIND = "mind:scout"
+PERSON = "ada"
+MIND = "scout"
 STAGES = ("unfold", "map", "compare", "detail")
 
 
@@ -43,11 +43,12 @@ def test_views_and_results_pass_the_hives_own_checks(program, demo_url):
         hive.attach(MIND, action, "allow")
     hive.attach(MIND, "use-tool", "ask")
 
-    def mind(action, key, **params):
-        return run(hive.agent_act(SWARM, MIND, action, params, key))
+    def mind(action, key, approval_id=None, **params):
+        return run(hive.agent_act(SWARM, MIND, action, params, key, approval_id))
 
-    def person(action, items=(), **params):
-        return run(hive.person_act(SWARM, PERSON, action, list(items), params, confirmed=True))
+    def person(action, items=(), base_revision=None, **params):
+        return run(hive.person_act(SWARM, PERSON, action, list(items), params, confirmed=True,
+                                   base_revision=base_revision))
 
     def views():
         """Every stage, with no focus, a missing focus, and one item of each kind in focus."""
@@ -63,6 +64,10 @@ def test_views_and_results_pass_the_hives_own_checks(program, demo_url):
     assert person("add-server", name="bad", url="http://example.com/mcp")["status"] == "refused"
     assert person("add-server", name="demo", url=demo_url)["status"] == "done"
     assert views() == {"server"}
+    assert person("list-tools", ["server:demo"])["status"] == "done"
+    stale = person("accept-reads", ["server:demo"], base_revision="r-old")
+    assert stale["status"] == "stale" and stale["graph"]["items"]
+    assert person("accept-reads", ["server:demo"])["status"] == "done"
     statuses = [
         mind("list-servers", "k1")["status"],
         mind("list-tools", "k2", server="demo")["status"],
@@ -76,8 +81,9 @@ def test_views_and_results_pass_the_hives_own_checks(program, demo_url):
     ]
     assert statuses == ["done", "done", "done", "done", "refused", "error", "refused", "error", "refused"]
     write = {"server": "demo", "tool": "create_note", "arguments": {"title": "plan", "text": "x"}}
-    hive.approve(mind("use-tool", "w1", **write)["approvals"][0], PERSON)
-    assert mind("use-tool", "w1", **write)["status"] == "done"
+    waiting = mind("use-tool", "w1", **write)
+    hive.approve(waiting["approval_id"], PERSON)
+    assert mind("use-tool", "w1", waiting["approval_id"], **write)["status"] == "done"
     assert views() == {"server", "tool", "call"}
     stale = person("remove-server", ["server:demo"], base_revision="r-old")
     assert stale["status"] == "stale" and stale["graph"]["items"]
