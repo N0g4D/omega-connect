@@ -69,7 +69,8 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
   `mcp>=1.30,<3`, 1.30 being the lowest version tested.
 - `connect/store.py`: per-swarm folder under `OMEGA_CONNECT_DATA_DIR`:
   servers.json (no secrets; the tools a person accepted as read, with the
-  digest of each definition), secrets.bin (Fernet), trace.jsonl (digests),
+  digest of each definition), secrets.bin (Fernet: each person's sign-in under
+  their principal, and which one is lent to minds), trace.jsonl (digests),
   intents.bin (app-level idempotency for use-tool, each answer included:
   Fernet, newest half kept past 1 MiB; a plain intents.json is moved in).
   Files mode 0600.
@@ -100,7 +101,7 @@ can finish it.
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests            # 64 tests, ~70 s, localhost only
+python -m pytest -q tests            # 67 tests, ~75 s, localhost only
 python -m pytest -q examples/teams-mcp   # 32 tests, ~17 s, Graph simulated in memory
 ```
 
@@ -135,8 +136,9 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
    the 400-item view, input checks, durable store, browser sign-in with PKCE.
    Then: recoveries never run a tool twice, use-tool's records encrypted.
    Open points 3 (confirmed by MesTTo), 6 and 7 (dependencies, MesTTo's
-   check) are to verify on a scratch hive; 4 is issue #8, on the branch
-   `per-person-signin`.
+   check) are to verify on a scratch hive; 4 is issue #8, done on the branch
+   `per-person-signin`: a sign-in per person, lent to minds on purpose with
+   connect and for_minds, a mind's write approved by the lender.
 2. Microsoft 365 showcase on a dev tenant (Microsoft 365 Developer Program):
    Entra app registration (public client, device code enabled), delegated
    scopes for reading a Teams channel, then one write (post a message) behind

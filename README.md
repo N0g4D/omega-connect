@@ -27,7 +27,7 @@ opens around 19–20 November.
 | `list-tools` | yes | read | Tools per server, each classed `read` or `write` |
 | `inspect-tool` | yes | read | One tool's description and full input schema |
 | `read-tool` | yes | read | Runs a tool only if it is classed `read` |
-| `use-tool` | yes | (write) | Runs any visible tool; a mind's call needs a person's approval ("ask") |
+| `use-tool` | yes | (write) | Runs any visible tool; a mind's call needs a person's approval ("ask"), and on a sign-in lent to minds the lender's |
 | `add-server`, `remove-server` | no | confirm | People only |
 | `accept-reads` | no | confirm | Accept the tools a server marks read-only as reads: a whole server, or one tool |
 | `reclass-tool` | no | confirm | Make a tool `write` or `hidden`, or back to `default` (never `read`) |
@@ -186,10 +186,24 @@ changed the page. A sign-in nobody finishes leaves the view when it
 expires. The app registration needs that address as a redirect URI under
 *Mobile and desktop applications*.
 
-Either way, the view then shows the account that
-signed in (`preferred_username` from the id_token, kept only to show it; the
-id_token itself is not stored), which is the account every mind in the swarm
-acts as on that server. `revoke` deletes the token.
+Each person signs in for themselves: the app keeps every person's sign-in
+under their principal (`ctx.actor.principal`, such as `user:ada`), encrypted,
+and a person's own calls to the server use their own. One who has not signed
+in is told to run `connect`. A sign-in reaches the swarm's minds only when its
+person lends it on purpose: `connect` with `{"for_minds": true}`, confirmed
+like any `connect`, lends the person's sign-in, or, if they have none yet, the
+one it starts. One sign-in per server is lent at a time; lending another
+replaces it. A mind's call uses the lent sign-in, and with none lent it is
+refused. A mind's write on it runs as the lender's account, so only the
+lender can approve it: the approver the hive names (`approved_by`) must be
+the lender. `use-tool` also declares `approver: "person"` (PROGRAMS.md 9d),
+so that a named person approves, never the local operator password; whether
+the hive applies it to minds' approvals is to verify on a scratch hive. The view says how many people signed in and whose sign-in is lent,
+with its account (`preferred_username` from the id_token, kept only to show
+it; the id_token itself is not stored). `revoke` deletes only your own
+sign-in; if it was the lent one, minds have none until a person lends one
+again. A sign-in kept by an earlier version (one per server, naming no
+principal) counts as none: its person signs in again, and lends it.
 
 The parameter is `signin` rather than `auth` because the host refuses request
 bodies with credential-like keys.
@@ -252,7 +266,7 @@ Behaviour that changes for a hive that ran 0.1.0:
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests        # 64 tests, mock MCP servers on localhost, no outside network
+python -m pytest -q tests        # 67 tests, mock MCP servers on localhost, no outside network
 ```
 
 Both suites (this one and `examples/teams-mcp`) pass with MCP SDK 2.3 and
@@ -305,6 +319,14 @@ Coverage of the first review's changes:
 | Token renewal: off the event loop, once at a time per server, never over a revoke | `test_a_token_renewal_does_not_block_the_event_loop`, `test_calls_on_several_loops_renew_the_token_once`, `test_a_renewal_that_ends_after_a_revoke_does_not_bring_the_token_back` |
 | A renewed token opens a new session; the call running on the old one finishes | `test_a_renewed_token_opens_a_new_session`, `test_a_call_running_when_the_token_is_renewed_finishes_on_its_session` |
 
+Coverage of issue #8, which person a mind acts for:
+
+| Change | Tests |
+|---|---|
+| Each person signs in for themselves: their own calls use their own sign-in, revoke deletes only theirs | `test_each_person_signs_in_for_themselves` |
+| Minds use only a sign-in lent to them on purpose, one per server at a time | `test_minds_use_only_a_sign_in_lent_to_them` |
+| A mind's write on a lent sign-in needs the lender's approval; `use-tool` declares `approver: "person"` | `test_a_minds_write_on_a_lent_sign_in_needs_the_lenders_approval`, `test_describe_matches_the_brief` |
+
 ## Open points for the flagship team
 
 Checked against `hive/PROGRAMS.md` in the pre-release copy of omegahive
@@ -336,13 +358,15 @@ rest on MesTTo's word and are to verify on a scratch hive.
    `idempotency_key` and `record_id`. So traces keep the approver, the
    approval's id and `record_id`; a mind's `use-tool` with no approval is
    refused; and a recovery never runs a tool twice.
-4. **Later, on its own branch: which person a mind acts for.** Today a server
-   uses the token of the person who last completed `connect`, and the view
-   shows which account that is. Issue #8 proposes a sign-in per person, which
-   a person lends to the swarm's minds on purpose, with a mind's write
-   approved by the lender and `use-tool` declaring `approver: "person"` (only
-   a named person, never the local operator password; PROGRAMS.md 9d). It is
-   not in this branch: it comes later, on the branch `per-person-signin`.
+4. **Which person a mind acts for: issue #8, on this branch.** Each person
+   signs in for themselves, under their principal (`ctx.actor.principal`),
+   and their own calls use their own sign-in. A sign-in reaches the swarm's
+   minds only when its person lends it with `connect` and `for_minds`, one
+   per server at a time; a mind's write on it needs the lender's approval
+   (`ctx.actor.approval.approved_by`, open point 3). `use-tool` declares
+   `approver: "person"` (PROGRAMS.md 9d); whether the hive applies it to
+   minds' approvals, and the principal on the person route, are to verify on
+   a scratch hive with the rest of point 3.
 5. **Agreed, as a separate small piece:** the mind skill for native Omega
    minds (brief, "a second, smaller piece").
 6. **Failed writes delivered again after "ask": MesTTo's reading of flagship

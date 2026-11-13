@@ -81,16 +81,18 @@ does not accept `organizations`.
 omega-connect adds `openid` and `profile` (to show who signed in) and
 `offline_access` (so the token can be renewed).
 
-**2. connect** (person, confirmed), on `server:teams`. The result shows a code
-and `https://microsoft.com/devicelogin`, to this person only: the app's view
-never shows the code. Sign in there with the tenant account and accept the
+**2. connect** (person, confirmed), on `server:teams`, with
+`{"for_minds": true}`: the sign-in is the person's own, and this lends it to
+the swarm's minds, which use no other. The result shows a code and
+`https://microsoft.com/devicelogin`, to this person only: the app's view never
+shows the code. Sign in there with the tenant account and accept the
 permissions. The app finishes the sign-in by itself; the view then shows
-`Sign-in: oauth-device (signed in as <the account>)`.
+`Sign-in: oauth-device (1 person signed in; lent to minds by <principal>, as <the account>)`.
 
 On a tenant whose security defaults block the device code, run connect with
-`{"flow": "browser"}` instead. Open the address in the result, sign in and
-accept, then copy the address of the empty page the browser lands on and run
-connect again with `{"redirect_url": "<that address>"}`.
+`{"flow": "browser", "for_minds": true}` instead. Open the address in the
+result, sign in and accept, then copy the address of the empty page the
+browser lands on and run connect again with `{"redirect_url": "<that address>"}`.
 
 **3. list-tools** (mind) with `{"server": "teams"}`. Every tool is `write` for
 now: the three Graph reads carry `"review": "not reviewed"`, because a

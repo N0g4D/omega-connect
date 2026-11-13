@@ -147,10 +147,11 @@ class Demo:
         """Terminal controls dropped, and the token values of the sign-in (the current ones and any
         seen before) replaced."""
         try:
-            token = self.store.credentials(SERVER_NAME) or {}
+            tokens = self.store.signins(SERVER_NAME)["people"].values()
         except self.program.store_mod.StoreError:
-            token = {}
-        self.secrets.update(value for value in (token.get("access_token"), token.get("refresh_token")) if value)
+            tokens = ()
+        for token in tokens:
+            self.secrets.update(value for value in (token.get("access_token"), token.get("refresh_token")) if value)
         text = UNSAFE.sub("", str(text))
         for secret in self.secrets:
             text = text.replace(secret, "[token removed]")
@@ -258,8 +259,8 @@ class Demo:
         """Authorization code with PKCE: the person signs in in a browser and pastes back the address it lands
         on. The sign-in address carries the tenant and client IDs in full, so it is opened, not printed,
         where a browser can be opened."""
-        self.call_line("connect", {"flow": "browser"}, [f"server:{SERVER_NAME}"])
-        started = self.person("connect", [f"server:{SERVER_NAME}"], {"flow": "browser"})
+        self.call_line("connect", {"flow": "browser", "for_minds": True}, [f"server:{SERVER_NAME}"])
+        started = self.person("connect", [f"server:{SERVER_NAME}"], {"flow": "browser", "for_minds": True})
         if started.get("status") != "needs_input":
             self.need(started, "connect", HINT)  # says why, then stops
         detail = started["detail"]
@@ -289,8 +290,9 @@ class Demo:
             self.say("The sign-in is still open: paste the address again, or sign in again from the same page.", 2)
 
     def device_code(self) -> None:
-        self.call_line("connect", {}, [f"server:{SERVER_NAME}"])
-        detail = self.need(self.person("connect", [f"server:{SERVER_NAME}"], {}), "connect", HINT)["detail"]
+        self.call_line("connect", {"for_minds": True}, [f"server:{SERVER_NAME}"])
+        detail = self.need(self.person("connect", [f"server:{SERVER_NAME}"], {"for_minds": True}), "connect",
+                           HINT)["detail"]
         self.say(f"Open    {detail['verification_uri']}", 2)
         self.say(f"Code    {detail['user_code']}", 2)
         self.say("Sign in with an account of the tenant and accept the permissions; the demo goes on by itself.", 2)
@@ -421,7 +423,8 @@ class Demo:
         self.call_line("use-tool", params)
         posted = self.data(self.need(self.mind("use-tool", params, key, approval["id"]), "use-tool",
                                      HINT)).get("posted") or {}
-        account = (self.store.credentials(SERVER_NAME) or {}).get("account") or "the account that signed in"
+        signins = self.store.signins(SERVER_NAME)
+        account = (signins["people"].get(signins["minds"]) or {}).get("account") or "the account that signed in"
         self.say(f"✓ Posted in Teams as {account}: message {posted.get('id')}, {posted.get('at')}", 2)
         if posted.get("url"):
             self.say(posted["url"], 4)

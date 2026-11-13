@@ -292,7 +292,8 @@ def test_the_demo_reads_the_channel_and_posts_only_after_a_yes(start, platform):
     assert run.graph() == reads + [f"POST /teams/{TEAM}/channels/{CHANNEL}/messages"]
 
     out = run.output
-    for shown in ("Open    https://microsoft.com/devicelogin", f"Sign-in: oauth-device (signed in as {ACCOUNT})",
+    for shown in ("Open    https://microsoft.com/devicelogin",
+                  f"Sign-in: oauth-device (1 person signed in; lent to minds by user:operator, as {ACCOUNT})",
                   "read:  list_channels, list_teams, read_channel_messages", "write: post_channel_message",
                   "Hi Bob, the demo is at 3pm", "The host answers approval_required: request apr-1",
                   "text     Test message from omega-connect", "with the same key and approval_id apr-1",
@@ -337,7 +338,7 @@ def test_the_browser_sign_in_opens_the_address_and_takes_back_where_the_browser_
     run.send(landed.split("?")[0] + "?error=access_denied&error_description=The+user+declined.")
     run.expect("✗ the sign-in ended with access_denied: The user declined.")
     run.send(landed)
-    run.expect(f"Sign-in: oauth-device (signed in as {ACCOUNT})")
+    run.expect(f"Sign-in: oauth-device (1 person signed in; lent to minds by user:operator, as {ACCOUNT})")
     run.expect("Which team? [1-2]: ")
     run.send("1", "", "y")  # the team, the default text, the approval
     assert run.finish() == 0

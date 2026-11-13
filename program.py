@@ -79,9 +79,11 @@ IDENTITY_SCOPES = ("openid", "profile", "offline_access")
 # The host refuses a view with more items than this (hive/core/programs.py, MAX_ITEMS).
 MAX_ITEMS_IN_VIEW = 400
 MAX_CALLS_IN_VIEW = 30
-_PENDING_SIGNINS: dict[tuple[str, str], dict] = {}  # who started a sign-in; never its code
+# (swarm, server, principal) -> a sign-in that person started; never its code
+_PENDING_SIGNINS: dict[tuple[str, str, str], dict] = {}
 _SIGNIN_LOCK = threading.Lock()
-_REFRESH_LOCKS: dict[tuple[str, str], threading.Lock] = {}  # one token renewal at a time per (swarm, server)
+# one token renewal at a time per (swarm, server, principal)
+_REFRESH_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _REFRESH_LOCKS_GUARD = threading.Lock()
 
 # Contract open point: the brief lists use-tool with effect "write". The public
@@ -94,8 +96,9 @@ USE_TOOL_EFFECT: str | None = None
 
 def describe():
     agent_read = {"agents": True, "effect": "read"}
+    # approver "person": a named person approves, never the local operator password (PROGRAMS.md 9d).
     use_tool = {"id": "use-tool", "label": "Use a tool (may change data)", "applies_to": ["tool"],
-                "agents": True, "binding_params": ["server", "tool", "arguments"]}
+                "agents": True, "binding_params": ["server", "tool", "arguments"], "approver": "person"}
     if USE_TOOL_EFFECT:
         use_tool["effect"] = USE_TOOL_EFFECT
     return {
@@ -151,6 +154,14 @@ def _actor(ctx) -> str:
         if value:
             return str(value)
     return str(actor)
+
+
+def _principal(ctx) -> str:
+    """Whose sign-in a person's call uses: the hive's principal for them (user:<id>), the same name
+    an approval gives its approver; _actor() when the hive sends none."""
+    actor = getattr(ctx, "actor", None)
+    principal = actor.get("principal") if isinstance(actor, dict) else getattr(actor, "principal", None)
+    return str(principal) if principal else _actor(ctx)
 
 
 def _command(ctx, name: str) -> Any:
@@ -218,9 +229,28 @@ def _safe_url(url: str | None) -> str:
     return f"{parts.scheme}://{host}{port}{parts.path}"
 
 
-async def _spec(swarm: str, store, record: dict) -> Any:
-    """Server record + credentials -> engine spec. Credentials live only here."""
-    headers = await _auth_headers(swarm, store, record)
+def _signin_owner(ctx, store, record: dict) -> str | None:
+    """Whose sign-in a call to an oauth-device server uses: a person's own, and for a mind the one
+    the swarm's minds use. None for the other kinds of server."""
+    if (record.get("auth") or {}).get("kind") != "oauth-device":
+        return None
+    name = record["name"]
+    if _actor_kind(ctx) == "mind":
+        owner = store.signins(name)["minds"]
+        if not owner:
+            raise engine_mod.EngineError("credentials", f"no sign-in to '{name}' is lent to minds; a person "
+                                                        "lends theirs with connect and for_minds")
+        return owner
+    owner = _principal(ctx)
+    if not store.has_credentials(name, owner):
+        raise engine_mod.EngineError("credentials", f"you have not signed in to '{name}'; run connect to sign in")
+    return owner
+
+
+async def _spec(swarm: str, store, record: dict, owner: str | None) -> Any:
+    """Server record + credentials -> engine spec. Credentials live only here; `owner` is whose
+    sign-in an oauth-device server gets (_signin_owner)."""
+    headers = await _auth_headers(swarm, store, record, owner)
     return engine_mod.ServerSpec(
         name=record["name"],
         transport=record.get("transport", "http"),
@@ -233,7 +263,7 @@ async def _spec(swarm: str, store, record: dict) -> Any:
     )
 
 
-async def _auth_headers(swarm: str, store, record: dict) -> dict[str, str]:
+async def _auth_headers(swarm: str, store, record: dict, owner: str | None) -> dict[str, str]:
     auth = record.get("auth") or {"kind": "none"}
     kind = auth.get("kind", "none")
     if kind == "none":
@@ -248,13 +278,13 @@ async def _auth_headers(swarm: str, store, record: dict) -> dict[str, str]:
                 "credentials", f"the operator has not set {auth['variable']} for server '{record['name']}'")
         return {"Authorization": f"Bearer {value}"}
     if kind == "oauth-device":
-        token = store.credentials(record["name"])
+        token = store.credentials(record["name"], owner)
         if not token:
             raise engine_mod.EngineError(
-                "credentials", f"nobody has signed in to '{record['name']}' yet; a person must run connect")
+                "credentials", f"that sign-in to '{record['name']}' was deleted; a person must run connect")
         if oauth_mod.needs_refresh(token):
             # The identity provider is called in a thread, so the hive's event loop keeps running.
-            token = await asyncio.to_thread(_renew_token, swarm, store, record)
+            token = await asyncio.to_thread(_renew_token, swarm, store, record, owner)
         return {"Authorization": f"Bearer {token['access_token']}"}
     raise engine_mod.EngineError("config", f"unknown auth kind '{kind}'")
 
@@ -296,26 +326,26 @@ def _token_may_not_go(variable: str, url: str | None) -> str | None:
     return None
 
 
-def _renew_token(swarm: str, store, record: dict) -> dict:
-    """Refresh a sign-in, one renewal at a time per (swarm, server): Entra rotates refresh tokens,
-    so two renewals at once would spend the same one and fail. Runs in a thread, holding a
-    threading lock for the whole renewal: act() may run on several event loops, and a caller
-    that stops waiting cannot let a second renewal start halfway through the first."""
+def _renew_token(swarm: str, store, record: dict, owner: str) -> dict:
+    """Refresh a person's sign-in, one renewal at a time per (swarm, server, person): Entra rotates
+    refresh tokens, so two renewals at once would spend the same one and fail. Runs in a thread,
+    holding a threading lock for the whole renewal: act() may run on several event loops, and a
+    caller that stops waiting cannot let a second renewal start halfway through the first."""
     name, auth = record["name"], record["auth"]
     with _REFRESH_LOCKS_GUARD:
-        lock = _REFRESH_LOCKS.setdefault((swarm, name), threading.Lock())
+        lock = _REFRESH_LOCKS.setdefault((swarm, name, owner), threading.Lock())
     with lock:
-        token = store.credentials(name)
+        token = store.credentials(name, owner)
         if not token:
             raise engine_mod.EngineError("credentials", f"nobody is signed in to '{name}'; a person must run connect")
         if not oauth_mod.needs_refresh(token):
             return token  # renewed by another call while this one waited
         new = oauth_mod.refresh(auth["tenant"], auth["client_id"], auth["scopes"], token)
         new["person"] = token.get("person")
-        if store.replace_credentials(name, token, new):
+        if store.replace_credentials(name, owner, token, new):
             return new
         # Revoked, or replaced by a new sign-in, during the renewal: never write over that.
-        current = store.credentials(name)
+        current = store.credentials(name, owner)
         if not current:
             raise engine_mod.EngineError("credentials", f"the sign-in to '{name}' was revoked; a person must run connect")
         return current
@@ -329,10 +359,11 @@ def _secrets_for(store, record: dict) -> tuple[str, ...]:
         values.append(os.environ.get(auth.get("variable", ""), ""))
     if auth.get("kind") == "oauth-device":
         try:
-            token = store.credentials(record["name"]) or {}
+            tokens = store.signins(record["name"])["people"].values()  # everyone's, whoever is acting
         except store_mod.StoreError:
-            token = {}
-        values += [token.get("access_token", ""), token.get("refresh_token", "") or ""]
+            tokens = ()
+        for token in tokens:
+            values += [token.get("access_token", ""), token.get("refresh_token", "") or ""]
     return tuple(v for v in values if v)
 
 
@@ -406,8 +437,8 @@ def _server_status(swarm: str, record: dict) -> dict:
     return out
 
 
-async def _connected(store, swarm: str, record: dict):
-    spec = await _spec(swarm, store, record)
+async def _connected(store, swarm: str, record: dict, owner: str | None):
+    spec = await _spec(swarm, store, record, owner)
     return await ENGINE.connect(swarm, spec), spec
 
 
@@ -432,20 +463,30 @@ def _error_text(exc: BaseException, secrets: tuple[str, ...]) -> str:
 # =================================================================== view
 
 def _signin_text(swarm: str, store, name: str, record: dict) -> str:
-    """A server's sign-in line in the view: the account that signed in, never a code or a token.
-    The code of a sign-in in progress goes only to the person who ran connect."""
+    """A server's sign-in line in the view: how many people signed in, and whose sign-in the minds
+    use, with its account; never a code or a token. The code of a sign-in in progress goes only to
+    the person who ran connect."""
     kind = (record.get("auth") or {}).get("kind", "none")
     if kind != "oauth-device":
         return f"Sign-in: {kind}"
     try:
-        token = store.credentials(name)
+        signins = store.signins(name)
     except store_mod.StoreError:
-        token = None
-    account = engine_mod.clean_text((token or {}).get("account"), 120)
-    state = "not signed in" if not token else f"signed in as {account}" if account else "signed in"
-    pending = _PENDING_SIGNINS.get((swarm, name))
-    if pending:
-        state += f"; a sign-in started by {pending['by']} is in progress"
+        signins = {"people": {}, "minds": None}
+    people, minds = signins["people"], signins["minds"]
+    if not people:
+        state = "not signed in"
+    else:
+        state = f"{len(people)} {'person' if len(people) == 1 else 'people'} signed in"
+        if minds in people:
+            account = engine_mod.clean_text(people[minds].get("account"), 120)
+            state += f"; lent to minds by {minds}" + (f", as {account}" if account else "")
+        else:
+            state += "; none lent to minds"
+    with _SIGNIN_LOCK:  # sign-in threads add and drop entries
+        started = sorted(by for (s, n, by) in _PENDING_SIGNINS if (s, n) == (swarm, name))
+    if started:
+        state += f"; a sign-in started by {', '.join(started)} is in progress"
     return f"Sign-in: oauth-device ({state})"
 
 
@@ -593,9 +634,9 @@ async def act(ctx, action, items, params):
         if action == "list-servers":
             return _list_servers(swarm, store)
         if action == "list-tools":
-            return await _list_tools(swarm, store, items, params)
+            return await _list_tools(ctx, swarm, store, items, params)
         if action == "inspect-tool":
-            return await _inspect_tool(swarm, store, items, params)
+            return await _inspect_tool(ctx, swarm, store, items, params)
         if action in ("read-tool", "use-tool"):
             return await _call_tool(ctx, swarm, store, action, items, params)
         if action in ("add-server", "remove-server", "accept-reads", "reclass-tool", "connect", "revoke"):
@@ -650,7 +691,7 @@ def _list_servers(swarm, store):
     return _result("done", f"{len(out)} server(s)", detail={"servers": out})
 
 
-async def _list_tools(swarm, store, items, params):
+async def _list_tools(ctx, swarm, store, items, params):
     names = [params["server"]] if params.get("server") else \
         [i[7:] for i in items or [] if i.startswith("server:")] or sorted(store.servers())
     out = {}
@@ -660,7 +701,7 @@ async def _list_tools(swarm, store, items, params):
             out[name] = {"error": "no such server"}
             continue
         try:
-            worker, _ = await _connected(store, swarm, record)
+            worker, _ = await _connected(store, swarm, record, _signin_owner(ctx, store, record))
             out[name] = [_tool_entry(record, t) for t in sorted(worker.tools.values(), key=lambda t: t.name)
                          if _classify(record, t) != HIDDEN]
         except Exception as exc:
@@ -668,9 +709,9 @@ async def _list_tools(swarm, store, items, params):
     return _result("done", "tools by server; class says whether read-tool may run it", detail={"tools": out})
 
 
-async def _inspect_tool(swarm, store, items, params):
+async def _inspect_tool(ctx, swarm, store, items, params):
     record, tool = _target(store, items, params, need_tool=True)
-    worker, _ = await _connected(store, swarm, record)
+    worker, _ = await _connected(store, swarm, record, _signin_owner(ctx, store, record))
     info = worker.tools.get(tool)
     if info is None or _classify(record, info) == HIDDEN:
         return _refused(f"server '{record['name']}' has no available tool '{tool}'")
@@ -746,12 +787,22 @@ async def _run_tool(ctx, swarm, store, action, record, tool, arguments, sending=
         return _refused("a person approves every use-tool call a mind makes: the owner keeps use-tool on "
                         "\"ask\" for minds, and the mind sends the request again with the approval; reads go "
                         "through read-tool", detail={"type": "approval_needed"}), False
+    try:
+        owner = _signin_owner(ctx, store, record)  # one owner for the whole call, retries included
+    except engine_mod.EngineError as exc:
+        store.trace({**trace, "status": "error", "reason": exc.message[:200]})
+        return _result("error", exc.message, detail={"type": exc.kind}), False
+    if action == "use-tool" and _actor_kind(ctx) == "mind" and owner and approval.get("approved_by") != owner:
+        # A mind's write on a lent sign-in runs as the lender's account, so it is theirs to approve.
+        store.trace({**trace, "status": "refused", "reason": "approver-not-lender"})
+        return _refused(f"this write would run as the sign-in {owner} lent to the swarm's minds, so only {owner} "
+                        "can approve it", detail={"type": "lender_approval_needed", "lender": owner}), False
     # The class is checked against the definition the session holds, and the call goes out only
     # while it still holds that one. If the list is reloaded in between (tools/list_changed, a
     # reconnect), nothing is sent and the tool is classed once more by its new definition.
     for last_try in (False, True):
         try:
-            worker, spec = await _connected(store, swarm, record)
+            worker, spec = await _connected(store, swarm, record, owner)
         except Exception as exc:
             message = _error_text(exc, secrets)
             store.trace({**trace, "status": "error", "reason": message[:200]})
@@ -929,14 +980,24 @@ async def _connect(ctx, swarm, store, items, params):
     if auth.get("kind") != "oauth-device":
         return _refused("this server has no sign-in; nothing to connect")
     store_mod._fernet()  # fail now, not after the person signs in, if tokens cannot be stored
-    key = (swarm, record["name"])
-    person = _actor(ctx)
+    person, actor = _principal(ctx), _actor(ctx)  # whose sign-in it is; who the trace names
+    key = (swarm, record["name"], person)
     if params.get("redirect_url") is not None:
-        return await _finish_browser_signin(swarm, store, record, person, str(params["redirect_url"]))
+        return await _finish_browser_signin(swarm, store, record, person, actor, str(params["redirect_url"]))
+    for_minds = params.get("for_minds", False)
+    if not isinstance(for_minds, bool):
+        return _refused("for_minds is true (lend your sign-in to the swarm's minds) or false")
+    if for_minds and store.lend(record["name"], person):
+        # Lent on purpose, through the host's confirm: the person is already signed in.
+        account = engine_mod.clean_text((store.credentials(record["name"], person) or {}).get("account"), 120)
+        store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor,
+                     "status": "lent"})
+        return _result("done", f"your sign-in to '{record['name']}'" + (f" ({account})" if account else "") +
+                       " is now the one the swarm's minds use")
     flow = params.get("flow", "device")
     if flow == "browser":
         signin = oauth_mod.start_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"])
-        pending = {"by": person, "browser": signin}  # the address goes only to this person
+        pending = {"by": person, "browser": signin, "for_minds": for_minds}  # the address goes only to this person
         with _SIGNIN_LOCK:
             _PENDING_SIGNINS[key] = pending
 
@@ -969,11 +1030,11 @@ async def _connect(ctx, swarm, store, items, params):
             # Close the old session before the new token is visible, so a call made
             # with the new token never lands on a session that is being closed.
             ENGINE.forget(swarm, record["name"])
-            store.put_credentials(record["name"], token)
+            store.put_credentials(record["name"], person, token, for_minds=for_minds)
             store.trace({"action": "connect", "server": record["name"], "tool": None,
-                         "actor": person, "status": "done"})
+                         "actor": actor, "status": "done"})
         except Exception as exc:
-            store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": person,
+            store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor,
                          "status": "error", "reason": getattr(exc, "message", exc.__class__.__name__)[:200]})
         finally:
             with _SIGNIN_LOCK:
@@ -987,10 +1048,10 @@ async def _connect(ctx, swarm, store, items, params):
                            "expires_in": int(code.expires_at - time.time())})
 
 
-async def _finish_browser_signin(swarm, store, record, person, landed):
+async def _finish_browser_signin(swarm, store, record, person, actor, landed):
     """The person pastes the address their browser landed on. A wrong or failed paste leaves the sign-in
     open until it expires, so they can sign in again from the same address and paste the new one."""
-    key = (swarm, record["name"])
+    key = (swarm, record["name"], person)
     with _SIGNIN_LOCK:
         pending = _PENDING_SIGNINS.get(key)
     signin = (pending or {}).get("browser")
@@ -1007,25 +1068,31 @@ async def _finish_browser_signin(swarm, store, record, person, landed):
         token = await asyncio.to_thread(oauth_mod.finish_browser_flow, auth["tenant"], auth["client_id"],
                                         auth["scopes"], signin, landed)
     except oauth_mod.OAuthError as exc:
-        store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": person,
+        store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor,
                      "status": "error", "reason": exc.message[:200]})
         raise
     token["person"] = person
     # As for the device code: close the old session before the new token is visible.
     ENGINE.forget(swarm, record["name"])
-    store.put_credentials(record["name"], token)
+    store.put_credentials(record["name"], person, token, for_minds=pending.get("for_minds", False))
     with _SIGNIN_LOCK:
         if _PENDING_SIGNINS.get(key) is pending:
             _PENDING_SIGNINS.pop(key)
-    store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": person, "status": "done"})
+    store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor, "status": "done"})
     account = engine_mod.clean_text(token.get("account"), 120)
     return _result("done", f"signed in to '{record['name']}'" + (f" as {account}" if account else ""))
 
 
 def _revoke(ctx, swarm, store, items, params):
+    """A person deletes their own sign-in; if it was lent to the minds, they have none until a person
+    lends one again."""
     record, _ = _target(store, items, params, need_tool=False)
-    removed = store.delete_credentials(record["name"])
+    person = _principal(ctx)
+    for_minds = store.signins(record["name"])["minds"] == person
+    removed = store.delete_credentials(record["name"], person)
     ENGINE.forget(swarm, record["name"])
     store.trace({"action": "revoke", "server": record["name"], "tool": None, "actor": _actor(ctx),
                  "status": "done" if removed else "noop"})
-    return _result("done", "sign-in deleted" if removed else "there was no sign-in to delete")
+    if not removed:
+        return _result("done", "you had no sign-in to delete")
+    return _result("done", "your sign-in deleted" + ("; minds have none until a person lends one" if for_minds else ""))
