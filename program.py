@@ -87,6 +87,21 @@ ACCEPTED, CHANGED, UNREVIEWED = "accepted", "changed since review", "not reviewe
 # Added to every oauth-device sign-in: openid and profile bring an id_token naming who signed in,
 # offline_access a refresh token.
 IDENTITY_SCOPES = ("openid", "profile", "offline_access")
+# What add-server asks a person for on a hive page, as form fields (hive/PROGRAMS.md §2). A page sends flat values, so
+# the sign-in comes as signin_kind with its own fields; a direct call may still send the signin object instead.
+ADD_SERVER_INPUTS = {
+    "name": {"type": "string", "title": "Name", "description": "lowercase letters, digits, - or _, up to 41"},
+    "url": {"type": "string", "title": "Address", "description": "https://, or http:// only for a server on this machine"},
+    "description": {"type": "string", "title": "What it's for"},
+    "signin_kind": {"type": "string", "title": "Sign-in", "default": "none",
+                    "oneOf": [{"const": "none", "title": "None"},
+                              {"const": "oauth-device", "title": "Microsoft sign-in, by each person"},
+                              {"const": "bearer-env", "title": "A token from the hive's environment"}]},
+    "tenant": {"type": "string", "title": "Directory (tenant) ID", "description": "for Microsoft sign-in"},
+    "client_id": {"type": "string", "title": "Application (client) ID", "description": "for Microsoft sign-in"},
+    "scopes": {"type": "string", "title": "Scopes", "description": "for Microsoft sign-in, separated by spaces, least privilege first"},
+    "variable": {"type": "string", "title": "Token variable", "description": "for a token from the environment: OMEGA_CONNECT_CRED_<NAME>"},
+}
 # The host refuses a view with more items than this (hive/core/programs.py, MAX_ITEMS).
 MAX_ITEMS_IN_VIEW = 400
 MAX_CALLS_IN_VIEW = 30
@@ -139,7 +154,9 @@ def describe():
             {"id": "read-tool", "label": "Run a read-only tool", "applies_to": ["tool"],
              "binding_params": ["server", "tool", "arguments"], **agent_read},
             use_tool,
-            {"id": "add-server", "label": "Add a server", "applies_to": ["server"], "confirm": True},
+            # applies_to []: it acts on the app itself, so a page offers it before any server exists; its inputs are
+            # form fields a page asks for first (hive/PROGRAMS.md §2, MCP's elicitation form shapes)
+            {"id": "add-server", "label": "Add a server", "applies_to": [], "confirm": True, "params": ADD_SERVER_INPUTS},
             {"id": "remove-server", "label": "Remove server", "applies_to": ["server"], "confirm": True},
             {"id": "accept-reads", "label": "Accept read-only tools (whole server or one tool)",
              "applies_to": ["server", "tool"], "confirm": True},
@@ -148,7 +165,10 @@ def describe():
             # approver "person" here too: a sign-in always belongs to a named person, so the hive refuses
             # connect to the local operator password (403 person_required).
             {"id": "connect", "label": "Sign in to this server", "applies_to": ["server"], "confirm": True,
-             "approver": "person"},
+             "approver": "person", "params": {"flow": {
+                 "type": "string", "title": "How to sign in", "default": "device",
+                 "oneOf": [{"const": "device", "title": "A code to enter on another device"},
+                           {"const": "browser", "title": "Sign in in a browser here"}]}}},
             {"id": "revoke", "label": "Revoke sign-in", "applies_to": ["server"], "confirm": True},
         ],
     }
@@ -720,7 +740,13 @@ async def act(ctx, action, items, params):
             handler = {"add-server": _add_server, "remove-server": _remove_server, "accept-reads": _accept_reads,
                        "reclass-tool": _reclass_tool, "connect": _connect, "revoke": _revoke}[action]
             result = handler(ctx, swarm, store, items, params)
-            return await result if asyncio.iscoroutine(result) else result
+            result = await result if asyncio.iscoroutine(result) else result
+            # A change made from the page shows at once: a done result's graph replaces the host's view (PROGRAMS.md
+            # §3), so it carries the view after the change, at the step the person was on (the host sends focus and
+            # stage with every act). Without it the page kept "No servers yet" after add-server.
+            if result.get("status") == "done" and "graph" not in result:
+                result["graph"] = view(ctx, params.get("focus"), params.get("stage") or "unfold")
+            return result
         return _refused(f"unknown action '{action}'")
     except _NoSignin as exc:
         return _refused(exc.message, detail={"type": exc.kind})
@@ -960,6 +986,18 @@ async def _run_tool(ctx, swarm, store, action, record, tool, arguments, trace, s
 _URL_SECRET = re.compile(r"(token|key|secret|password|sig|code)=", re.I)
 
 
+def _flat_signin(params):
+    """The sign-in a hive page sends as flat fields (ADD_SERVER_INPUTS): signin_kind and the fields that kind takes,
+    left out when blank. Scopes come as one line separated by spaces, as OAuth writes them (RFC 6749, section 3.3)."""
+    kind = str(params.get("signin_kind") or "none")
+    takes = {"oauth-device": ("tenant", "client_id"), "bearer-env": ("variable",)}.get(kind, ())
+    auth = {"kind": kind, **{key: params[key] for key in takes if key in params}}
+    if kind == "oauth-device":
+        scopes = params.get("scopes", "")
+        auth["scopes"] = scopes.split() if isinstance(scopes, str) else scopes
+    return auth
+
+
 def _add_server(ctx, swarm, store, items, params):
     name = str(params.get("name", "")).strip().lower()
     if not store_mod.SERVER_NAME.match(name):
@@ -1004,7 +1042,7 @@ def _add_server(ctx, swarm, store, items, params):
             except (TypeError, ValueError):
                 return _refused(f"{key} is a whole number of seconds, 1 to 600")
     # "signin" rather than "auth": the host refuses bodies with credential-like keys.
-    auth = params.get("signin") or {"kind": "none"}
+    auth = params.get("signin") or _flat_signin(params)
     if not isinstance(auth, dict):
         return _refused('signin is an object such as {"kind": "none"}')
     kind = auth.get("kind", "none")

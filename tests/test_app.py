@@ -150,6 +150,53 @@ def test_describe_matches_the_brief(program):
     assert actions["accept-reads"]["applies_to"] == ["server", "tool"]
 
 
+def test_a_hive_page_can_ask_for_add_server_and_connect_inputs(program):
+    """add-server acts on the app itself (applies_to []), so a hive page offers it before any server exists, and both
+    it and connect declare their inputs as form fields a page asks for first (hive PROGRAMS.md §2, MCP's elicitation
+    form shapes): every input a string, the choices with titles and a default."""
+    actions = {a["id"]: a for a in program.describe()["actions"]}
+    assert actions["add-server"]["applies_to"] == []
+    inputs = actions["add-server"]["params"]
+    assert list(inputs) == ["name", "url", "description", "signin_kind", "tenant", "client_id", "scopes", "variable"]
+    assert all(field["type"] == "string" and field["title"] for field in inputs.values())
+    assert [c["const"] for c in inputs["signin_kind"]["oneOf"]] == ["none", "oauth-device", "bearer-env"]
+    assert inputs["signin_kind"]["default"] == "none"
+    flow = actions["connect"]["params"]["flow"]
+    assert [c["const"] for c in flow["oneOf"]] == ["device", "browser"] and flow["default"] == "device"
+
+
+def test_add_server_takes_the_sign_in_as_a_pages_flat_fields(hive, demo_url, monkeypatch):
+    """A page sends flat values: signin_kind and that kind's fields, blank ones left out, the scopes on one line. They
+    make the same sign-in the signin object does; a direct call's object still wins."""
+    monkeypatch.setenv("OMEGA_CONNECT_CRED_TEAMS", "tok-flat-check")
+    monkeypatch.setenv("OMEGA_CONNECT_ORIGINS_TEAMS", origin(demo_url))   # where the operator lets that token go
+    flat ={"signin_kind": "oauth-device", "client_id": SIGNIN["client_id"], "scopes": "Mail.Read  Chat.Read"}
+    assert add(hive, "s1", "flat", demo_url, **flat)["status"] == "done"
+    assert add(hive, "s1", "whole", demo_url, signin={**SIGNIN, "scopes": ["Mail.Read", "Chat.Read"]})["status"] == "done"
+    servers = hive.program.store_mod.SwarmStore("s1").servers()
+    assert servers["flat"]["auth"] == servers["whole"]["auth"]
+    assert servers["flat"]["auth"]["tenant"] == "organizations"   # left blank on the page: the default
+    assert add(hive, "s1", "env", demo_url, signin_kind="bearer-env", variable="OMEGA_CONNECT_CRED_TEAMS")["status"] == "done"
+    assert hive.program.store_mod.SwarmStore("s1").servers()["env"]["auth"] == {"kind": "bearer-env", "variable": "OMEGA_CONNECT_CRED_TEAMS"}
+    assert add(hive, "s1", "plain", demo_url, signin_kind="none")["status"] == "done"
+    assert add(hive, "s1", "odd", demo_url, signin_kind="password")["status"] == "refused"
+    assert add(hive, "s1", "both", demo_url, signin={"kind": "none"}, signin_kind="oauth-device")["status"] == "done"
+    assert hive.program.store_mod.SwarmStore("s1").servers()["both"]["auth"] == {"kind": "none"}
+
+
+def test_a_change_from_the_page_returns_the_view_after_it(hive, demo_url):
+    """A hive page replaces its view with a done result's graph, so a change made there carries the view after it: the
+    new server shows at once, at the step the person was on (the page sends focus and stage with every act)."""
+    first = add(hive, "s1", "demo", demo_url, focus=None, stage="unfold")
+    assert first["status"] == "done" and "server:demo" in {i["id"] for i in first["graph"]["items"]}
+    second = add(hive, "s1", "other", demo_url, focus="server:demo", stage="map")
+    assert {"server:demo", "server:other"} <= {i["id"] for i in second["graph"]["items"]}
+    assert second["graph"]["focus"] == "server:demo"
+    gone = run(hive.person_act("s1", PERSON, "remove-server", ["server:other"], {"stage": "unfold"}, confirmed=True))
+    assert gone["status"] == "done" and "server:other" not in {i["id"] for i in gone["graph"]["items"]}
+    assert "graph" not in add(hive, "s1", "odd", demo_url, signin_kind="password")   # refused: nothing changed
+
+
 # ------------------------------------------------------------------ done #2
 
 def test_lists_servers_and_tools(hive, demo_url):
