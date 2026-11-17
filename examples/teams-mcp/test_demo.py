@@ -149,23 +149,12 @@ sys.exit(demo.main())
 """
 
 
-class DemoRun:
-    """demo.py in its own process, answered line by line as a person at the terminal would."""
+class Run:
+    """A script in its own process, answered line by line as a person at the terminal would."""
 
-    def __init__(self, platform, tmp_path: Path, browser: bool = True):
-        self.graph_log = tmp_path / "graph.log"
-        self.browser_log = tmp_path / "browser.log"
-        self.temp = tmp_path / "tmp"  # the demo's temporary folder goes here
-        self.temp.mkdir()
-        self.operator_store = tmp_path / "operator-store"
-        env = {name: value for name, value in os.environ.items() if not name.startswith("OMEGA_CONNECT_")}
-        env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", TMPDIR=str(self.temp),
-                   FAKE_GRAPH_LOG=str(self.graph_log), OMEGA_CONNECT_OAUTH_AUTHORITY=platform.url,
-                   FAKE_BROWSER_LOG=str(self.browser_log), FAKE_BROWSER="yes" if browser else "none",
-                   # what an operator's shell may hold; the demo must use neither
-                   OMEGA_CONNECT_DATA_DIR=str(self.operator_store), OMEGA_CONNECT_SECRET_KEY=SHELL_KEY)
-        self.proc = subprocess.Popen([sys.executable, "-c", RUNNER, str(DEMO), __file__], env=env, cwd=tmp_path,
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    def __init__(self, argv: list[str], env: dict, cwd: Path):
+        self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT)
         self._out = b""
         self._seen = 0
         self._reader = threading.Thread(target=self._read, daemon=True)
@@ -180,7 +169,7 @@ class DemoRun:
         return self._out.decode("utf-8", errors="replace")
 
     def expect(self, text: str, timeout: float = 60) -> None:
-        """Waits until demo.py prints `text` after what the last expect found."""
+        """Waits until the script prints `text` after what the last expect found."""
         deadline = time.monotonic() + timeout
         while True:
             ended = not self._reader.is_alive()  # then the output is complete
@@ -188,7 +177,7 @@ class DemoRun:
             if found >= 0:
                 self._seen = found + len(text)
                 return
-            assert not ended and time.monotonic() < deadline, f"demo.py did not print {text!r}:\n{self.output}"
+            assert not ended and time.monotonic() < deadline, f"the script did not print {text!r}:\n{self.output}"
             time.sleep(0.05)
 
     def send(self, *lines: str) -> None:
@@ -196,7 +185,7 @@ class DemoRun:
         self.proc.stdin.flush()
 
     def finish(self, timeout: float = 60) -> int:
-        """Closes the input, waits for the demo to end and returns its exit code."""
+        """Closes the input, waits for the script to end and returns its exit code."""
         try:
             self.proc.stdin.close()
         except BrokenPipeError:
@@ -206,7 +195,7 @@ class DemoRun:
         return code
 
     def stop(self) -> None:
-        """After each test: a demo still running gets Ctrl-C, so that it stops its server too."""
+        """After each test: a script still running gets Ctrl-C, so that it stops what it started too."""
         if self.proc.poll() is None:
             self.proc.send_signal(signal.SIGINT)
             try:
@@ -220,6 +209,24 @@ class DemoRun:
                 stream.close()
             except OSError:
                 pass
+
+
+class DemoRun(Run):
+    """demo.py in its own process, with this file in place of server.py and a stand-in for the browser."""
+
+    def __init__(self, platform, tmp_path: Path, browser: bool = True):
+        self.graph_log = tmp_path / "graph.log"
+        self.browser_log = tmp_path / "browser.log"
+        self.temp = tmp_path / "tmp"  # the demo's temporary folder goes here
+        self.temp.mkdir()
+        self.operator_store = tmp_path / "operator-store"
+        env = {name: value for name, value in os.environ.items() if not name.startswith("OMEGA_CONNECT_")}
+        env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", TMPDIR=str(self.temp),
+                   FAKE_GRAPH_LOG=str(self.graph_log), OMEGA_CONNECT_OAUTH_AUTHORITY=platform.url,
+                   FAKE_BROWSER_LOG=str(self.browser_log), FAKE_BROWSER="yes" if browser else "none",
+                   # what an operator's shell may hold; the demo must use neither
+                   OMEGA_CONNECT_DATA_DIR=str(self.operator_store), OMEGA_CONNECT_SECRET_KEY=SHELL_KEY)
+        super().__init__([sys.executable, "-c", RUNNER, str(DEMO), __file__], env, tmp_path)
 
     def server(self) -> dict | None:
         """The server's process id and the OMEGA_CONNECT_ settings it got; None if it never started."""

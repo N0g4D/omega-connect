@@ -57,6 +57,23 @@ The brief, in short:
   the same `record_id` and no `prior_failed` (only `person_activity` actions,
   on the person route, get that). The person route records nothing for our
   actions: `record_id` None.
+- The Mac test build (0.33, f6b4b1c, installed in `~/OmegaHive`; read it,
+  never copy or quote its code here), as read in `hive/core` and its page
+  source on 17 Nov 2026. A person's confirm act needs a token from
+  `POST /api/programs/{id}/confirm` (`{swarm_id, action, payload,
+  payload_digest}`, PROGRAMS.md 9d), bound to session, swarm, action and
+  digest, single use, 120 s. A local-owner session (kind `sso`, principal
+  `user:u_...`, a named person) needs the hive's own `Origin` on every
+  request that changes something. The generic app page offers an action only
+  on a selected item and sends it without params (then a form for the `needs`
+  of a `needs_input` answer): it cannot run add-server on an empty view, nor
+  connect with `flow: browser`. A mind acts under `program:omega-connect:<action>`
+  rules (`POST /api/policy`) alone, while the app has no activation: an
+  activation makes a reviewed attachment mandatory for every mind, and
+  activating needs `offer`/`bind`/`unbind` hooks, which the app lacks
+  (409 hooks_missing). The approval's note wakes only an `asleep` mind, not a
+  `created` one. Its `hive/core/program_actions.py` is byte for byte the
+  832b36e copy that the fake host follows.
 - Failed writes (Jon on #1): repeat automatically only when the attempt
   certainly did not arrive (a refused connection; for use-tool also a 404
   for a session the server no longer has, which ran nothing, and after which
@@ -124,6 +141,14 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
   per run, device code or browser sign-in, the approval asked in the terminal,
   output filtered of tokens);
   `test_demo.py` drives it as a person would, with Graph and sign-in simulated.
+  `hive_demo.py` is the demo on a real hive (the Mac test build): it makes the
+  mind's calls with the mind's token, and the person's steps that the hive's
+  pages cannot send (add-server, connect with the browser sign-in) with the
+  owner's session, after a yes at the terminal; accept-reads and the approval
+  are done on the hive's pages while it waits. Standard library only; no token,
+  code or sign-in link printed or written. `test_hive_demo.py` runs it against
+  the hive's HTTP routes simulated over `tests/fakehive.py`; as a program, it
+  is a stand-in server for a rehearsal (`hive_demo.py --no-signin`).
 
 Classification rule: read only if the server says `readOnlyHint`, a person
 accepted that tool with `accept-reads` (people only, confirm), and its
@@ -139,7 +164,7 @@ can finish it.
 ```sh
 pip install -r requirements-dev.txt
 python -m pytest -q tests            # 83 tests, ~90 s, localhost only
-python -m pytest -q examples/teams-mcp   # 32 tests, ~17 s, Graph simulated in memory
+python -m pytest -q examples/teams-mcp   # 48 tests, ~37 s, Graph and the hive's routes simulated
 ```
 
 Contract checker, from the pre-release copy next to this repo (until omegahive
@@ -193,6 +218,11 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
    2026 (the channel read, a message posted once approved).
 3. Scratch hive demo, recorded, as a named person (use-tool declares approver
    "person": with the operator password nobody runs or approves a write).
+   17 Nov 2026, branch `scratch-hive-demo`: the app is mounted on the Mac test
+   build in `~/OmegaHive` (MesTTo on #2: its owner is a named person), which
+   loads it and whose `programs_check` passes; `examples/teams-mcp/hive_demo.py`
+   plays the mind's part there (README of the example, "On a scratch hive").
+   Not yet run against the real hive or the tenant: that run is Alessio's.
 4. Optional: the mind skill for native Omega minds wrapping
    `POST /api/agent/programs/omega-connect/act` (confirm with the team first).
    A standalone MeTTa plugin that calls MCP directly from Omega core already

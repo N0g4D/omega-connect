@@ -196,6 +196,124 @@ removes the token values of the sign-in, and the terminal control characters
 that a message could carry. Nothing is kept between runs, so each run signs in
 again.
 
+## On a scratch hive (Mac test build)
+
+`hive_demo.py` runs the demo on a real hive: the one the Mac test build (0.33
+here) installs in `~/OmegaHive`, where you enter as its owner, a named person.
+On this build a mind cannot call an app's actions by itself yet, so the script
+makes the mind's calls in its place, with the mind's own token. The person's
+steps are yours: on the hive's pages where a page can do them, otherwise from
+the script, with your sign-in, after a yes at the terminal.
+
+**Mount the app**, from a checkout of this repository:
+
+```sh
+~/OmegaHive/venv/bin/python -m pip install -r requirements.txt
+printf 'HIVE_PLUGIN_DIRS=%s\n' "$PWD" >> ~/OmegaHive/hive.env
+printf 'OMEGA_CONNECT_SECRET_KEY=%s\n' "$(~/OmegaHive/venv/bin/python -c \
+  'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" >> ~/OmegaHive/hive.env
+~/OmegaHive/app/install/macos/omegahive.sh stop
+~/OmegaHive/app/install/macos/omegahive.sh start
+```
+
+The key goes from the command into the file without reaching the screen.
+`omegahive.sh` reads `hive.env` at each start (a shell reads it: a folder with
+spaces in its path needs quotes) and keeps your folder beside the Tools app's
+in `HIVE_PLUGIN_DIRS`. The app is not among the hive's pins, so it loads
+unpinned, from your checkout as it is. Its store is `~/.omega-connect`. To
+check: *Tool connections* is among the hive's apps, and the hive's own checker
+passes:
+
+```sh
+cd ~/OmegaHive/app && ~/OmegaHive/venv/bin/python -m hive.programs_check /path/to/omega-connect
+```
+
+**Who does what.** The routes are the build's own.
+
+| Step | Who | Where |
+|---|---|---|
+| swarm, mind, rules | you | the script: `POST /api/swarms`, `POST /api/agents` (the only answer that carries the mind's token) and `POST /api/policy` with `{"scope": "agent:<mind id>", "skill": "program:omega-connect:<action>", "mode": ...}`, three times |
+| add-server | you | the script, after a yes: the app's page offers an action only on an item you selected and sends it without parameters, so it cannot add the first server |
+| connect | you | the script, after a yes, with `{"flow": "browser"}`. The page's own *Sign in to this server* sends no parameters, which is the device code |
+| list-tools, read-tool | the mind | the script: `POST /api/agent/programs/omega-connect/act` with `{"action", "params", "idempotency_key"}` and the mind's token. The hive takes the mind and its swarm from the token; a body that names them is refused |
+| accept-reads | you | the app's page: select the server `teams`, *Accept read-only tools*, confirm |
+| use-tool | the mind | the script, same route. The hive answers `{"status": "approval_required", "approval_id": ...}` |
+| approval | you | the hive's Approvals page: *Approve*, or *No* |
+| use-tool, again | the mind | the script: the same body with the `approval_id` |
+
+A person's act that declares `confirm` needs the host's confirm first:
+`POST /api/programs/omega-connect/confirm` with `{"swarm_id", "action",
+"payload": {"items", "params", "base_revision"}, "payload_digest"}` gives a
+`confirm_token` for that act alone, once, for two minutes; the act then goes
+to `POST /api/programs/omega-connect/act` with it. Every request of a person's
+session that changes something carries the hive's own `Origin`.
+
+The mind is made with `POST /api/agents` and never started: the hive's note
+about the approval is queued for it and does not wake it. It is attached with
+the three rules alone. The *Access* panel of the app's page is not the way:
+activating an app there needs attachment hooks that omega-connect does not
+have (as read in the build's code, the hive answers 409 `hooks_missing`).
+
+**Run it**, once *Before the demo* is done (the browser sign-in needs the
+redirect URI of step 2):
+
+```sh
+python examples/teams-mcp/server.py --port 8765    # in one terminal, left running
+python examples/teams-mcp/hive_demo.py             # in another; standard library only
+```
+
+1. It signs in as the hive's owner through a one-time link
+   (`omegahive.sh signin-url`), finds or makes the swarm *omega-connect demo*,
+   makes the mind `connect-scout` in it and writes its rules. It prints the
+   address of the app's page for that swarm.
+2. **add-server**: it asks for the *Directory (tenant) ID* and the
+   *Application (client) ID*, shows their first eight characters, and sends
+   add-server after your yes. A later run finds the server and asks for neither.
+3. **connect**: after your yes it opens the sign-in page in your browser, without
+   printing its address. Sign in and accept, then paste the whole address of
+   the empty page the browser lands on. What you paste is not shown.
+4. **list-tools** as the mind, then **accept-reads**: press Enter and accept
+   the reads on the app's page; the script waits and goes on by itself.
+5. **read-tool** `list_teams`, `list_channels`, `read_channel_messages`: choose
+   the team and the channel by number.
+6. **use-tool** `post_channel_message`: type the text, or press Enter for the
+   default one. The hive answers `approval_required` and the script shows the
+   request. Press Enter and answer on the Approvals page; once you approve,
+   the script sends the same request again with the `approval_id`, and the
+   message is posted once, as your Microsoft account. *No* posts nothing.
+7. It prints the app's trace and the hive's activity log for the mind, checks
+   that nothing the app returned is shaped like an access token, and ends its
+   session in the hive.
+
+At steps 4 and 6 the answer **2** makes the script send your accept-reads or
+your approval itself. The steps on the hive's pages are described from the
+build's page source: if a page does not offer one, stop with Ctrl-C and run
+again answering 2; the new run finds the server and the sign-in in place.
+
+No token, code or sign-in link is printed or written: the one-time link, your
+session's token, the mind's token and the hive's confirm tokens stay in the
+script's memory, and the Microsoft tokens stay with the app, inside the hive:
+they never reach the script.
+
+**Afterwards.** The mind stays in the hive, so you can show it there; its token
+ended with the run, the next run replaces it, and `hive_demo.py --cleanup`
+deletes it with its rules. Your Microsoft sign-in stays in the app's store,
+encrypted: *Revoke sign-in* on the server deletes it, *Remove server* the
+server. To unmount the app, take the two lines out of `hive.env`, restart the
+hive and delete `~/.omega-connect`.
+
+**A rehearsal without a tenant.** `test_hive_demo.py`, run as a program, is a
+stand-in for teams-mcp with a simulated Graph that needs no sign-in:
+
+```sh
+python examples/teams-mcp/test_hive_demo.py --port 8791
+python examples/teams-mcp/hive_demo.py --no-signin --swarm "omega-connect rehearsal" \
+    --server-url http://127.0.0.1:8791/mcp
+```
+
+It walks the same steps without connect, in a swarm of its own, and posts
+only to the stand-in's memory.
+
 ## If something fails
 
 | Symptom | Cause |
@@ -214,11 +332,17 @@ again.
 | demo.py: the device code sign-in fails on a tenant created since July 2026 | its security defaults block the device code: run the demo again and choose **2**, the browser |
 | demo.py, browser: `AADSTS50011` in the browser | the redirect URI `https://login.microsoftonline.com/common/oauth2/nativeclient` is missing under *Mobile and desktop applications* |
 | demo.py: the *Identity* line is not `https://login.microsoftonline.com` | `OMEGA_CONNECT_OAUTH_AUTHORITY` is set in the shell (the tests use it): unset it |
+| hive_demo.py: `This hive has no app 'omega-connect'` | the app is not mounted, or the hive was not restarted after `hive.env` changed |
+| hive_demo.py: `The hive gave no sign-in link` | the hive is not running: `omegahive.sh start`, or open Omega Hive |
+| hive_demo.py: `teams-mcp does not answer` | start `server.py` first, on the port of `--server-url` |
+| hive_demo.py: `A server named 'teams' is already in this swarm, with another address or sign-in` | a rehearsal or a run on another port left it: remove it on the app's page, or give another `--swarm` |
+| hive_demo.py keeps waiting for accept-reads or for your answer | the page did not send it: Ctrl-C, run again and answer **2** |
+| hive_demo.py: nothing appears as you paste the address | meant: the address carries a one-time code, so it is not shown. Press Enter after pasting |
 
 ## Tests
 
 ```sh
-python -m pytest -q examples/teams-mcp      # 32 tests, ~17 s
+python -m pytest -q examples/teams-mcp      # 48 tests, ~37 s
 ```
 
 Graph is simulated in memory (`FakeGraph` replaces `server.graph_send`), so no
@@ -248,4 +372,22 @@ own store and key and passes none of the shell's `OMEGA_CONNECT_` settings to
 the server; and that a failed sign-in, Ctrl-C or a closed input stop the demo,
 with the server stopped and the temporary folder deleted.
 
-Both files pass with MCP SDK 1.x and 2.x.
+`test_hive_demo.py` runs `hive_demo.py` in its own process against the hive's
+HTTP routes, simulated over the repository's fake hive with the checks the Mac
+test build makes on them: the one-time sign-in link, the `Origin` of a person's
+session, the confirm token of each confirm act (minted for the same session,
+swarm, action and payload digest, spent once), the mind's token on the mind's
+route. The test plays the person on the hive's pages with a session of its own.
+The tests check that nothing is posted before the approval and exactly once
+after it, whether the answer comes from the Approvals page or from the script;
+that *No* posts nothing; that the mind's calls carry the mind's token, no
+`Origin` and a body that names neither the mind nor its swarm; that no sign-in
+link, session, mind token, confirm token, Microsoft token or sign-in code
+reaches the screen, and no token any address; that a second run asks for no ID
+and replaces the first run's mind; that `--cleanup` deletes the mind an
+interrupted run left and denies its waiting request; that a missing hive, app
+or server is said before anything is made; that the confirm digest is the
+hive's (also against the build's shared vectors, when it is installed); and
+that a pasted address longer than a terminal line arrives whole and unshown.
+
+All three files pass with MCP SDK 1.x and 2.x.
