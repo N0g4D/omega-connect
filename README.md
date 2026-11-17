@@ -346,8 +346,8 @@ Coverage against the brief's definition of done:
 | `use-tool` waiting for approval | `test_use_tool_waits_for_a_person` |
 | An identical retry returning the recorded result | `test_identical_retry_returns_the_recorded_result`, `test_app_level_idempotency_also_holds`, `test_a_recovery_answers_from_the_apps_record_or_the_hives` |
 | Tokens never in results, views or logs | `test_tokens_never_appear_in_results_views_traces_or_logs`, `test_device_code_sign_in_and_revoke`, `test_browser_sign_in_with_pkce` |
-| `programs_check` passes | COMPATIBLE with the pre-release copy: `cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-connect`. It sees only an empty view, so `test_contract.py` checks fuller views and every result with the hive's validators |
-| Live demo: read a Teams channel, then a write a person approves | run on a real tenant with `examples/teams-mcp/demo.py`, in the repository's fake hive (13 Nov 2026: the channel read, a message posted once approved); on a scratch hive still to do, as a named person. `test_demo.py` and the last test of `test_server.py` rehearse it offline |
+| `programs_check` passes | COMPATIBLE with the pre-release copy: `cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-connect`, and with the checker of the Mac test build 0.33, which loads the app from `HIVE_PLUGIN_DIRS` (17 Nov 2026). It sees only an empty view, so `test_contract.py` checks fuller views and every result with the hive's validators |
+| Live demo: read a Teams channel, then a write a person approves | run on a real tenant with `examples/teams-mcp/demo.py`, in the repository's fake hive (13 Nov 2026: the channel read, a message posted once approved); on a scratch hive still to do, as a named person: `examples/teams-mcp/hive_demo.py` is the script for it on the Mac test build, where it makes the mind's calls with the mind's token (the example's README, *On a scratch hive*). `test_demo.py`, `test_hive_demo.py` and the last test of `test_server.py` rehearse it offline |
 
 Coverage of the first review's changes:
 
@@ -468,4 +468,4 @@ settled points 4 and 6 on issue #1.
 | `connect/store.py` | Per-swarm servers (with the reads a person accepted), encrypted credentials and `use-tool` records, traces |
 | `connect/oauth.py` | OAuth 2.0 device authorization grant (standard library only) |
 | `tests/` | Fake host, mock MCP server, fake identity provider, tests |
-| `examples/teams-mcp/` | Microsoft Teams MCP server over Graph for the live demo (127.0.0.1 only), its tests, the demo steps and `demo.py`, which runs them on a real tenant |
+| `examples/teams-mcp/` | Microsoft Teams MCP server over Graph for the live demo (127.0.0.1 only), its tests, the demo steps, `demo.py`, which runs them on a real tenant in the fake hive, and `hive_demo.py`, which runs them on a scratch hive (the Mac test build) |

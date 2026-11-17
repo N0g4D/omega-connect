@@ -42,9 +42,10 @@ from cryptography.fernet import Fernet
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SERVER = HERE / "server.py"
-sys.path.insert(0, str(ROOT / "tests"))
+sys.path[:0] = [str(HERE), str(ROOT / "tests")]
 
 from fakehive import FakeHive, HostRefusal, run  # noqa: E402
+from terminal_input import UNSAFE, Stop, ask, ask_hidden, ask_id  # noqa: E402
 
 # A named person: connect and use-tool declare approver "person", which the local operator password
 # (user:operator) is not.
@@ -54,30 +55,9 @@ SCOPES = [f"https://graph.microsoft.com/{name}" for name in
           ("Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Read.All", "ChannelMessage.Send")]
 GUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 DOMAIN = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
-UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")  # terminal controls, bidi overrides
 HINT = "See 'If something fails' in examples/teams-mcp/README.md."
 DEFAULT_POST = ("Test message from omega-connect: a mind read this channel and asked to post here, "
                 "and a person approved.")
-
-
-class Stop(Exception):
-    """The demo cannot go on; the reason has been printed."""
-
-
-def ask(prompt: str) -> str:
-    try:
-        return input(UNSAFE.sub("", prompt)).strip()
-    except EOFError:
-        print()
-        raise Stop from None
-
-
-def ask_id(prompt: str, valid, why: str) -> str:
-    while True:
-        value = ask(prompt)
-        if valid(value):
-            return value
-        print(f"  {why}")
 
 
 def _mask(value: str) -> str:
@@ -259,8 +239,8 @@ class Demo:
 
     def browser(self) -> None:
         """Authorization code with PKCE: the person signs in in a browser and pastes back the address it lands
-        on. The sign-in address carries the tenant and client IDs in full, so it is opened, not printed,
-        where a browser can be opened."""
+        on, which is not shown as they paste it. The sign-in address carries the tenant and client IDs in
+        full, so it is opened, not printed, where a browser can be opened."""
         self.call_line("connect", {"flow": "browser"}, [f"server:{SERVER_NAME}"])
         started = self.person("connect", [f"server:{SERVER_NAME}"], {"flow": "browser"})
         if started.get("status") != "needs_input":
@@ -276,11 +256,12 @@ class Demo:
         self.say("Sign in with an account of the tenant and accept the permissions. The browser then lands on an "
                  f"empty page whose address starts with {detail['redirect_uri']}: copy that whole address.", 2)
         while True:
-            landed = ask("  Address the browser landed on (Enter to stop): ")
+            landed = ask_hidden("  Paste the address the browser landed on (it is not shown; Enter alone stops): ")
             if not landed:
                 raise Stop
             # The code in it works once, with this run's PKCE verifier; still, it is never shown or kept.
             self.secrets.update(code for code in parse_qs(urlsplit(landed).query).get("code", []) if len(code) >= 16)
+            self.say(f"({len(landed):,} characters received)", 2)
             self.call_line("connect", {"redirect_url": "<the address you pasted>"}, [f"server:{SERVER_NAME}"])
             finished = self.person("connect", [f"server:{SERVER_NAME}"], {"redirect_url": landed})
             if finished.get("status") == "done":
