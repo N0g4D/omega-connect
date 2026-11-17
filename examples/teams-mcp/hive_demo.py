@@ -24,7 +24,7 @@ confirm tokens and the address your browser lands on after the Microsoft sign-in
 stay in this process's memory: they are never printed or written anywhere, and the
 address is not shown as you paste it. The tenant ID and the client ID are asked
 only when the server is not in the hive yet, and shown by their first characters.
-Standard library only, so any Python 3.10+ runs it.
+Standard library only, with terminal_input.py beside it, so any Python 3.10+ runs it.
 """
 
 from __future__ import annotations
@@ -46,6 +46,10 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from terminal_input import UNSAFE, Stop, ask, ask_hidden, ask_id  # noqa: E402
+
 APP_ID = "omega-connect"
 SERVER_NAME = "teams"
 DEFAULT_SERVER_URL = "http://127.0.0.1:8765/mcp"
@@ -60,7 +64,6 @@ SCOPES = [f"https://graph.microsoft.com/{name}" for name in
           ("Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Read.All", "ChannelMessage.Send")]
 GUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 DOMAIN = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
-UNSAFE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f‪-‮⁦-⁩]")  # terminal controls, bidi overrides
 # What omegahive.sh signin-url prints: the hive's own address on this machine, and a code that works once.
 SIGNIN_LINK = re.compile(r"(http://(?:127\.0\.0\.1|localhost):[0-9]{1,5})/local-signin#([A-Za-z0-9_-]{43})")
 JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}")  # the shape of an access token
@@ -73,64 +76,12 @@ APPROVAL_WAIT = 900  # and for the approval
 ACT_TIMEOUT = 240  # an act may connect, sign in again and try a write that did not arrive a few times
 
 
-class Stop(Exception):
-    """The demo cannot go on; the reason has been printed."""
-
-
 class Refusal(Exception):
     """An error answer of the hive: its HTTP status, and the code and message it gives."""
 
     def __init__(self, status: int, code: str, message: str):
         super().__init__(f"{status} {code}: {message}")
         self.status, self.code, self.message = status, code, message
-
-
-def ask(prompt: str) -> str:
-    try:
-        return input(UNSAFE.sub("", prompt)).strip()
-    except EOFError:
-        print()
-        raise Stop from None
-
-
-def ask_id(prompt: str, valid, why: str) -> str:
-    while True:
-        value = ask(prompt)
-        if valid(value):
-            return value
-        print(f"  {why}")
-
-
-def ask_hidden(prompt: str) -> str:
-    """A pasted line that is not shown: the address the browser lands on carries a one-time code.
-    At a terminal it is read key by key, since a terminal in line mode takes no line longer than its
-    limit (1,024 bytes on macOS, less than such an address can be) and then not even Enter."""
-    if not sys.stdin.isatty():
-        return ask(prompt)
-    import termios
-    import tty
-
-    sys.stdout.write(UNSAFE.sub("", prompt))
-    sys.stdout.flush()
-    descriptor = sys.stdin.fileno()
-    before = termios.tcgetattr(descriptor)
-    typed: list[str] = []
-    try:
-        tty.setcbreak(descriptor)  # no echo, no line mode; Ctrl-C still interrupts
-        while True:
-            char = sys.stdin.read(1)
-            if char in ("\n", "\r"):
-                break
-            if char in ("", "\x04"):  # the input ended, or Ctrl-D
-                raise Stop
-            if char in ("\x7f", "\x08"):
-                del typed[-1:]
-            else:
-                typed.append(char)
-    finally:
-        termios.tcsetattr(descriptor, termios.TCSADRAIN, before)
-        print()
-    return re.sub(r"\x1b\[20[01]~", "", "".join(typed)).strip()  # without a terminal's paste marks
 
 
 def ask_choice(prompt: str, choices: tuple[str, ...], default: str | None = None) -> str:

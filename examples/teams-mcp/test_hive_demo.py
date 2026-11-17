@@ -860,8 +860,9 @@ def test_a_token_in_what_the_app_returned_stops_the_demo(hive_demo, capsys):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="needs a pseudo-terminal")
 def test_a_long_pasted_address_arrives_whole_and_is_not_shown():
-    """At a terminal the address is read key by key without echo: in line mode a terminal takes no
-    line past its limit (1,024 bytes on macOS), and an address with a sign-in code can be longer."""
+    """The reader the two demos share (terminal_input.py): at a terminal the address is read key by key
+    without echo, whatever its length and without the marks a terminal puts around a paste. In line
+    mode a terminal takes no line past its limit (1,024 bytes on macOS)."""
     code = (f"import importlib.util; spec = importlib.util.spec_from_file_location('d', {str(HIVE_DEMO)!r}); "
             "d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d); "
             "value = d.ask_hidden('Paste: '); print('GOT', len(value), value[-12:])")

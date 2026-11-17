@@ -141,6 +141,9 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
   per run, device code or browser sign-in, the approval asked in the terminal,
   output filtered of tokens);
   `test_demo.py` drives it as a person would, with Graph and sign-in simulated.
+  `terminal_input.py` holds what both demos ask at the terminal with; the
+  address pasted after a browser sign-in is read key by key without echo
+  (line mode stops at 1,024 bytes on macOS, and the address carries a code).
   `hive_demo.py` is the demo on a real hive (the Mac test build): it makes the
   mind's calls with the mind's token, and the person's steps that the hive's
   pages cannot send (add-server, connect with the browser sign-in) with the
@@ -164,7 +167,7 @@ can finish it.
 ```sh
 pip install -r requirements-dev.txt
 python -m pytest -q tests            # 83 tests, ~90 s, localhost only
-python -m pytest -q examples/teams-mcp   # 48 tests, ~37 s, Graph and the hive's routes simulated
+python -m pytest -q examples/teams-mcp   # 50 tests, ~40 s, Graph and the hive's routes simulated
 ```
 
 Contract checker, from the pre-release copy next to this repo (until omegahive

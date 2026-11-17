@@ -174,7 +174,10 @@ python examples/teams-mcp/demo.py
    client IDs (where no browser opens, it prints the address and says so). Sign
    in and accept, then paste the whole address of the empty page the browser
    lands on; a wrong or declined one is asked again, and Enter alone stops the
-   demo. The app registration needs the redirect URI of *Before the demo*.
+   demo. What you paste is not shown, since the address carries a one-time
+   code, and it is read key by key, so an address longer than a terminal line
+   (1,024 bytes on macOS) arrives whole. The app registration needs the
+   redirect URI of *Before the demo*.
    Either way the demo then shows the account that the view names.
 3. **list-tools**, where every tool is `write`, then **accept-reads** on the
    definitions just listed: the three reads become `read`, and
@@ -337,12 +340,12 @@ only to the stand-in's memory.
 | hive_demo.py: `teams-mcp does not answer` | start `server.py` first, on the port of `--server-url` |
 | hive_demo.py: `A server named 'teams' is already in this swarm, with another address or sign-in` | a rehearsal or a run on another port left it: remove it on the app's page, or give another `--swarm` |
 | hive_demo.py keeps waiting for accept-reads or for your answer | the page did not send it: Ctrl-C, run again and answer **2** |
-| hive_demo.py: nothing appears as you paste the address | meant: the address carries a one-time code, so it is not shown. Press Enter after pasting |
+| demo.py, hive_demo.py: nothing appears as you paste the address | meant: the address carries a one-time code, so it is not shown. Press Enter after pasting |
 
 ## Tests
 
 ```sh
-python -m pytest -q examples/teams-mcp      # 48 tests, ~37 s
+python -m pytest -q examples/teams-mcp      # 50 tests, ~40 s
 ```
 
 Graph is simulated in memory (`FakeGraph` replaces `server.graph_send`), so no
@@ -367,10 +370,17 @@ message text cannot drive the terminal; that the device code, the tokens and
 the full tenant and client IDs never appear on screen; that the browser sign-in
 gives its address to the browser, not to the screen (printing it, with a
 warning, only where no browser opens), asks again after a wrong or declined
-address, and redeems the code once with its PKCE verifier; that the demo uses its
-own store and key and passes none of the shell's `OMEGA_CONNECT_` settings to
-the server; and that a failed sign-in, Ctrl-C or a closed input stop the demo,
-with the server stopped and the temporary folder deleted.
+address, and redeems the code once with its PKCE verifier; that at a terminal
+(a pseudo-terminal in the test) a pasted address of more than 2,048 bytes,
+which line mode would never deliver, signs in without being shown; that the
+demo uses its own store and key and passes none of the shell's
+`OMEGA_CONNECT_` settings to the server; that a failed sign-in, Ctrl-C or a
+closed input stop the demo, with the server stopped and the temporary folder
+deleted; and that no source file of the example holds an invisible control or
+bidirectional character.
+
+`terminal_input.py` is what the two demos ask at the terminal with: the
+prompts, and the reading of the pasted address.
 
 `test_hive_demo.py` runs `hive_demo.py` in its own process against the hive's
 HTTP routes, simulated over the repository's fake hive with the checks the Mac
@@ -388,6 +398,7 @@ and replaces the first run's mind; that `--cleanup` deletes the mind an
 interrupted run left and denies its waiting request; that a missing hive, app
 or server is said before anything is made; that the confirm digest is the
 hive's (also against the build's shared vectors, when it is installed); and
-that a pasted address longer than a terminal line arrives whole and unshown.
+that the shared reader returns a pasted address longer than a terminal line
+whole, unshown and without the marks a terminal puts around a paste.
 
 All three files pass with MCP SDK 1.x and 2.x.

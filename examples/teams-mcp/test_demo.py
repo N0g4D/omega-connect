@@ -14,12 +14,14 @@ import hashlib
 import importlib.util
 import json
 import os
+import pty
 import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,18 +152,33 @@ sys.exit(demo.main())
 
 
 class Run:
-    """A script in its own process, answered line by line as a person at the terminal would."""
+    """A script in its own process, answered line by line as a person at the terminal would: through
+    pipes, or, with `terminal`, on a pseudo-terminal, which echoes what is typed as a real one does."""
 
-    def __init__(self, argv: list[str], env: dict, cwd: Path):
-        self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT)
+    def __init__(self, argv: list[str], env: dict, cwd: Path, terminal: bool = False):
+        self._terminal = None
+        if terminal:
+            self._terminal, script_side = pty.openpty()
+            self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=script_side, stdout=script_side,
+                                         stderr=script_side)
+            os.close(script_side)
+        else:
+            self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT)
         self._out = b""
         self._seen = 0
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
 
     def _read(self) -> None:
-        for chunk in iter(lambda: os.read(self.proc.stdout.fileno(), 65536), b""):
+        source = self.proc.stdout.fileno() if self._terminal is None else self._terminal
+        while True:
+            try:
+                chunk = os.read(source, 65536)
+            except OSError:  # a terminal whose script has ended
+                return
+            if not chunk:
+                return
             self._out += chunk
 
     @property
@@ -181,14 +198,23 @@ class Run:
             time.sleep(0.05)
 
     def send(self, *lines: str) -> None:
-        self.proc.stdin.write("".join(line + "\n" for line in lines).encode())
-        self.proc.stdin.flush()
+        typed = "".join(line + "\n" for line in lines).encode()
+        if self._terminal is None:
+            self.proc.stdin.write(typed)
+            self.proc.stdin.flush()
+            return
+        for start in range(0, len(typed), 256):  # as a terminal hands over a paste, a piece at a time
+            os.write(self._terminal, typed[start:start + 256])
+            time.sleep(0.01)
 
     def finish(self, timeout: float = 60) -> int:
-        """Closes the input, waits for the script to end and returns its exit code."""
+        """Closes the input (at a terminal, Ctrl-D), waits for the script to end and returns its exit code."""
         try:
-            self.proc.stdin.close()
-        except BrokenPipeError:
+            if self._terminal is None:
+                self.proc.stdin.close()
+            else:
+                os.write(self._terminal, b"\x04")
+        except OSError:  # the script has ended already
             pass
         code = self.proc.wait(timeout=timeout)
         self._reader.join(timeout=10)
@@ -204,17 +230,21 @@ class Run:
                 self.proc.kill()
                 self.proc.wait()
         self._reader.join(timeout=10)
-        for stream in (self.proc.stdin, self.proc.stdout):
-            try:
-                stream.close()
-            except OSError:
-                pass
+        try:
+            if self._terminal is None:
+                self.proc.stdin.close()
+                self.proc.stdout.close()
+            else:
+                os.close(self._terminal)
+                self._terminal = -1  # closed: a second stop finds nothing to close
+        except OSError:
+            pass
 
 
 class DemoRun(Run):
     """demo.py in its own process, with this file in place of server.py and a stand-in for the browser."""
 
-    def __init__(self, platform, tmp_path: Path, browser: bool = True):
+    def __init__(self, platform, tmp_path: Path, browser: bool = True, terminal: bool = False):
         self.graph_log = tmp_path / "graph.log"
         self.browser_log = tmp_path / "browser.log"
         self.temp = tmp_path / "tmp"  # the demo's temporary folder goes here
@@ -226,7 +256,7 @@ class DemoRun(Run):
                    FAKE_BROWSER_LOG=str(self.browser_log), FAKE_BROWSER="yes" if browser else "none",
                    # what an operator's shell may hold; the demo must use neither
                    OMEGA_CONNECT_DATA_DIR=str(self.operator_store), OMEGA_CONNECT_SECRET_KEY=SHELL_KEY)
-        super().__init__([sys.executable, "-c", RUNNER, str(DEMO), __file__], env, tmp_path)
+        super().__init__([sys.executable, "-c", RUNNER, str(DEMO), __file__], env, tmp_path, terminal)
 
     def server(self) -> dict | None:
         """The server's process id and the OMEGA_CONNECT_ settings it got; None if it never started."""
@@ -263,8 +293,8 @@ def start(platform, tmp_path):
     """Starts demo.py and sends it the given lines; after the test, stops it if it still runs."""
     runs = []
 
-    def start(*lines: str, browser: bool = True) -> DemoRun:
-        runs.append(DemoRun(platform, tmp_path, browser))
+    def start(*lines: str, browser: bool = True, terminal: bool = False) -> DemoRun:
+        runs.append(DemoRun(platform, tmp_path, browser, terminal))
         if lines:
             runs[-1].send(*lines)
         return runs[-1]
@@ -333,7 +363,7 @@ def test_the_browser_sign_in_opens_the_address_and_takes_back_where_the_browser_
     since it carries the tenant and client IDs. A wrong or declined address is asked again; the right one
     signs in, and the demo goes on to the post."""
     run = start(TENANT, CLIENT_ID, "2")
-    run.expect("Address the browser landed on (Enter to stop): ")
+    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
     address = run.browser_address()
     query = {k: v[0] for k, v in parse_qs(urlsplit(address).query).items()}
     assert urlsplit(address).path == f"/{TENANT}/oauth2/v2.0/authorize" and query["client_id"] == CLIENT_ID
@@ -341,7 +371,7 @@ def test_the_browser_sign_in_opens_the_address_and_takes_back_where_the_browser_
     landed = authorize(platform, address)
     run.send(landed.replace("/common/oauth2/nativeclient", "/elsewhere"))
     run.expect("✗ paste the whole address the browser landed on")
-    run.expect("Address the browser landed on (Enter to stop): ")
+    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
     run.send(landed.split("?")[0] + "?error=access_denied&error_description=The+user+declined.")
     run.expect("✗ the sign-in ended with access_denied: The user declined.")
     run.send(landed)
@@ -360,9 +390,35 @@ def test_the_browser_sign_in_opens_the_address_and_takes_back_where_the_browser_
     assert run.leftovers() == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a pseudo-terminal")
+def test_at_a_terminal_an_address_longer_than_a_line_signs_in_and_is_never_shown(start, platform):
+    """A terminal in line mode takes no line longer than its limit (1,024 bytes on macOS), and past it
+    not even Enter: read with input(), a longer address never arrived. The demo reads it key by key,
+    without echo, so the code in it does not reach the screen either."""
+    run = start(TENANT, CLIENT_ID, "2", terminal=True)
+    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
+    query = {k: v[0] for k, v in parse_qs(urlsplit(run.browser_address()).query).items()}
+    code = "0.A" + "c0de_" * 400  # as long as the code of a work account can be
+    platform.codes[code] = (query["code_challenge"], query["redirect_uri"])
+    landed = f"{query['redirect_uri']}?code={code}&state={query['state']}&session_state=s-1"
+    assert len(landed.encode()) > 2 * 1024
+    run.send(landed)
+    run.expect(f"({len(landed):,} characters received)")
+    run.expect(f"Sign-in: oauth-device (signed in by user:ada, as {ACCOUNT}; minds use this sign-in)")
+    run.expect("Which team? [1-2]: ")
+    run.send("1", "", "y")
+    assert run.finish() == 0
+    out = run.output
+    assert "Demo complete." in out and "c0de_" not in out and query["state"] not in out
+    assert TENANT in out  # the terminal echoes what is typed at the other prompts, as a real one does
+    redeemed = [form for path, form in platform.requests if form.get("grant_type") == "authorization_code"]
+    assert [form["code"] for form in redeemed] == [code]
+    assert run.graph()[-1] == f"POST /teams/{TEAM}/channels/{CHANNEL}/messages" and run.leftovers() == []
+
+
 def test_without_a_browser_the_address_is_printed_with_a_warning(start):
     run = start(TENANT, CLIENT_ID, "2", browser=False)
-    run.expect("Address the browser landed on (Enter to stop): ")
+    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
     assert "pause a recording first" in run.output and run.browser_address() in run.output
     run.send("")  # Enter: stop
     assert run.finish() == 1
@@ -403,6 +459,14 @@ def test_closing_the_input_stops_the_demo(start):
     assert run.finish() == 1
     assert run.output.rstrip().endswith("Demo stopped.")
     assert run.server() is None and run.leftovers() == []
+
+
+def test_the_sources_hold_no_invisible_characters():
+    """A control or bidirectional character belongs in a source file as an escape, where it can be seen."""
+    for source in sorted(HERE.glob("*.py")):
+        hidden = {f"U+{ord(char):04X}" for char in source.read_text(encoding="utf-8")
+                  if unicodedata.category(char) in ("Cc", "Cf") and char != "\n"}
+        assert not hidden, f"{source.name}: {sorted(hidden)}"
 
 
 if __name__ == "__main__":  # demo.py starts this file in place of server.py (see RUNNER)
