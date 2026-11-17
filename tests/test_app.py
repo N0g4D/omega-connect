@@ -1,12 +1,16 @@
 """omega-connect against the brief's definition of done, through a fake host."""
 
 import asyncio
+import errno
 import json
 import logging
 import os
 import re
+import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -78,6 +82,57 @@ def expire(hive, swarm, server, person=PERSON):
     store = hive.program.store_mod.SwarmStore(swarm)
     principal = f"user:{person}"
     store.put_credentials(server, principal, {**store.credentials(server, principal), "expires_at": time.time() - 1})
+
+
+def browser_sign_in(hive, swarm, server, person=PERSON):
+    """A person runs connect with flow browser: its result, and the fields of the sign-in address in it."""
+    started = run(hive.person_act(swarm, person, "connect", [f"server:{server}"], {"flow": "browser"}, confirmed=True))
+    assert started["status"] == "done", started
+    address = urlsplit(started["detail"]["authorization_url"])
+    return started, {k: v[0] for k, v in parse_qs(address.query).items()}
+
+
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # straight to this machine: no proxy
+
+
+def browse(url, method="GET"):
+    """What a browser, or anything else on this machine, gets at an address: (status, page), or (None, "")
+    when nothing answers there."""
+    request = urllib.request.Request(url, method=method, data=None if method in ("GET", "HEAD") else b"x=1")
+    try:
+        with _DIRECT.open(request, timeout=10) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return exc.code, exc.read().decode()
+    except OSError:  # refused, or closed without an answer
+        return None, ""
+
+
+def ipv6_loopback():
+    """Whether this machine has ::1."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+def signin_text(hive, swarm="s1", server="m365"):
+    """The server's sign-in line in the view."""
+    lines = text_of(run(hive.view(swarm, PERSON)), f"server:{server}").splitlines()
+    return next(line for line in lines if line.startswith("Sign-in: "))
+
+
+def eventually(check, seconds=10):
+    """Whether `check` comes true within a few seconds: for what a thread of the app does on its own."""
+    deadline = time.monotonic() + seconds
+    while not check():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 def text_of(graph, item_id):
@@ -1096,103 +1151,287 @@ def test_sign_in_needs_an_encryption_key(hive, guarded_url, fake_authority, monk
     assert result["status"] == "error" and "OMEGA_CONNECT_SECRET_KEY" in result["message"]
 
 
-def test_browser_sign_in_with_pkce(hive, guarded_url, fake_authority, caplog, tmp_path):
-    """For tenants that block the device code: connect gives the person an address; they sign in and paste
-    back the address their browser lands on, and the app trades its code and the PKCE verifier for tokens."""
+def test_browser_sign_in_finishes_on_a_loopback_listener(hive, guarded_url, fake_authority, caplog, capfd, tmp_path):
+    """For tenants that block the device code (RFC 8252, 7.3): connect opens a listener on a free port of the
+    loopback interface and gives the person an address to sign in at. Their browser comes back to
+    http://localhost:<port> with a code; the app trades it for tokens, with the PKCE verifier and the same
+    redirect address, keeps them under that person and answers with a fixed page. The address goes only to the
+    person who ran connect; the code and the tokens reach no result, view, trace or log."""
     caplog.set_level(logging.DEBUG)
     assert add(hive, "s1", "m365", guarded_url, signin=SIGNIN)["status"] == "done"
-    started = run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {"flow": "browser"}, confirmed=True))
-    assert started["status"] == "needs_input" and list(started["needs"]) == ["redirect_url"]
-    address = urlsplit(started["detail"]["authorization_url"])
-    query = {k: v[0] for k, v in parse_qs(address.query).items()}
-    assert address.path == "/organizations/oauth2/v2.0/authorize"
+    unknown = run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {"flow": "pigeon"}, confirmed=True))
+    assert unknown["status"] == "refused"
+    started, query = browser_sign_in(hive, "s1", "m365")
+    address = started["detail"]["authorization_url"]
+    assert urlsplit(address).path == "/organizations/oauth2/v2.0/authorize" and address in started["message"]
     assert query["response_type"] == "code" and query["code_challenge_method"] == "S256"
     assert query["scope"] == "Mail.Read openid profile offline_access"
-    assert query["redirect_uri"] == started["detail"]["redirect_uri"]
-    assert query["redirect_uri"].endswith("/common/oauth2/nativeclient")
+    # What an app registration with the redirect URI http://localhost takes: Entra ignores the port.
+    assert re.fullmatch(r"http://localhost:[1-9][0-9]{0,4}", query["redirect_uri"])
+    assert started["detail"]["redirect_uri"] == query["redirect_uri"] and len(query["state"]) >= 32
     waiting = run(hive.view("s1", PERSON))
-    assert query["state"] not in json.dumps(waiting)  # the address goes only to the person who ran connect
+    assert query["state"] not in json.dumps(waiting) and query["code_challenge"] not in json.dumps(waiting)
     assert "not signed in; a sign-in started by" in text_of(waiting, "server:m365")
-    landed = fake_authority.authorize(started["detail"]["authorization_url"])
-    done = run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {"redirect_url": landed}, confirmed=True))
-    assert done["status"] == "done" and ACCOUNT in done["message"]
+    landed = fake_authority.authorize(address)  # the person signs in, and their browser comes back
+    status, page = browse(landed)
+    assert status == 200 and "You can close this page" in page
+    assert AUTH_CODE not in page and query["state"] not in page  # nothing of the request
     [sent] = fake_authority.redemptions
-    assert sent["redirect_uri"] == query["redirect_uri"] and len(sent["code_verifier"]) >= 43
-    signed = text_of(run(hive.view("s1", PERSON)), "server:m365")
-    assert f"Sign-in: oauth-device (signed in by user:{PERSON}, as {ACCOUNT}; minds use this sign-in)" \
-        in signed and "in progress" not in signed
+    assert sent["code"] == AUTH_CODE and len(sent["code_verifier"]) >= 43
+    assert sent["redirect_uri"] == query["redirect_uri"]  # the one the code was asked with
+    assert signin_text(hive) == f"Sign-in: oauth-device (signed in by user:{PERSON}, as {ACCOUNT}; " \
+                                "minds use this sign-in)"
+    store = hive.program.store_mod.SwarmStore("s1")
+    assert store.credentials("m365", f"user:{PERSON}")["access_token"] == SECRET
+    assert [(t["status"], t["actor"]) for t in store.traces(10) if t["action"] == "connect"] \
+        == [("done", f"person:{PERSON}")]
+    assert browse(landed) == (None, "")  # the listener closed with the outcome
     review(hive, "s1", "m365")
     after = mind(hive, "s1", "read-tool", "k1", server="m365", tool="add", arguments={"a": 20, "b": 22})
     assert after["detail"]["result"]["text"] == "42"  # the token from the browser sign-in was sent
-    outputs = [started, done, run(hive.view("s1", PERSON)), after]
-    assert_no_secrets(outputs, tmp_path, caplog, SECRET, REFRESH, sent["code_verifier"], AUTH_CODE,
-                      *fake_authority.id_tokens)
+    printed = capfd.readouterr()
+    apart_from_the_result = [page, waiting, run(hive.view("s1", PERSON)), after, store.traces(50), printed.out,
+                             printed.err]
+    assert_no_secrets([started, *apart_from_the_result], tmp_path, caplog, SECRET, REFRESH, sent["code_verifier"],
+                      AUTH_CODE, *fake_authority.id_tokens)
+    assert query["state"] not in json.dumps(apart_from_the_result) + caplog.text  # the address: in the result alone
 
 
-def test_a_browser_sign_in_finishes_only_with_its_own_address_for_its_own_person(hive, guarded_url, fake_authority):
+def test_only_the_redirect_with_its_state_completes_a_browser_sign_in(hive, guarded_url, fake_authority):
+    """The listener completes on a GET that carries the sign-in's state, and on nothing else. A browser asking
+    for an icon, a wrong state, a missing or repeated one, another path or another method, bytes that are no
+    request: each gets the same fixed error page, which carries nothing of the request, and the sign-in goes
+    on waiting."""
     add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
-
-    def connect(person, **params):
-        return run(hive.person_act("s1", person, "connect", ["server:m365"], params, confirmed=True))
-
-    assert connect(PERSON, flow="pigeon")["status"] == "refused"
-    assert connect(PERSON, redirect_url="https://login.microsoftonline.com/common/oauth2/nativeclient"
-                                        "?code=x&state=y")["status"] == "refused"  # nothing was started
-    started = connect(PERSON, flow="browser")
-    assert f"a sign-in started by user:{PERSON} is in progress" in text_of(run(hive.view("s1", PERSON)),
-                                                                             "server:m365")
+    started, query = browser_sign_in(hive, "s1", "m365")
     landed = fake_authority.authorize(started["detail"]["authorization_url"])
-    assert connect("eve", redirect_url=landed)["status"] == "refused"  # another person's sign-in
-    as_mind = Ctx(swarm_id="s1", actor=mind_actor("s1", MIND))  # the host offers connect to people only
-    assert run(hive.program.act(as_mind, "connect", ["server:m365"], {"redirect_url": landed}))["status"] == "refused"
-    elsewhere = connect(PERSON, redirect_url=landed.replace("/common/oauth2/nativeclient", "/elsewhere"))
-    assert elsewhere["detail"]["type"] == "bad_redirect"
-    forged = connect(PERSON, redirect_url=re.sub(r"state=[^&]+", "state=forged", landed))
-    assert forged["detail"]["type"] == "state_mismatch"
-    declined = connect(PERSON, redirect_url=landed.split("?")[0] + "?error=access_denied&error_description=declined")
-    assert declined["status"] == "error" and "access_denied" in declined["message"]
-    assert fake_authority.redemptions == []  # none of these reached the token endpoint
-    assert connect(PERSON, redirect_url=landed)["status"] == "done"  # still open after the wrong ones
-    assert connect(PERSON, redirect_url=landed)["status"] == "refused"  # and finished once
-    late = connect(PERSON, flow="browser")
-    hive.program._PENDING_SIGNINS[("s1", "m365", f"user:{PERSON}")]["browser"].expires_at = time.time() - 1
-    expired = connect(PERSON, redirect_url=fake_authority.authorize(late["detail"]["authorization_url"], "ac-2"))
-    assert expired["status"] == "refused" and "expired" in expired["message"]
-    assert len(fake_authority.redemptions) == 1
+    here, state = query["redirect_uri"], query["state"]
+    others = [f"{here}/favicon.ico", f"{here}/", f"{here}/?code={AUTH_CODE}",
+              f"{here}/?code={AUTH_CODE}&state=marker-7f3a",
+              landed.replace(state, state[:-1]), landed.replace(state, state + "x"),
+              landed.replace(state, state[:-1] + ("A" if state[-1] != "A" else "B")),
+              f"{landed}&state={state}",  # given twice
+              landed.replace(here + "/", here + "/callback")]
+    answers = {browse(address) for address in others}
+    answers |= {browse(landed, method) for method in ("POST", "PUT", "DELETE", "OPTIONS")}  # the right address
+    [(status, page)] = answers  # one answer for them all
+    assert status == 400 and "marker-7f3a" not in page and AUTH_CODE not in page and state not in page
+    assert browse(landed, "HEAD")[0] == 400
+    with socket.create_connection(("127.0.0.1", urlsplit(here).port), timeout=10) as raw:
+        raw.sendall(b"\x16\x03\x01\x02\x00 no request at all\r\n\r\n")
+        assert raw.recv(65536).startswith(b"HTTP/1.1 400 ")
+    store = hive.program.store_mod.SwarmStore("s1")
+    assert "a sign-in started by" in signin_text(hive)  # still waiting
+    assert fake_authority.redemptions == [] and store.traces(10) == [] and store.signins("m365") == {}
+    assert browse(landed)[0] == 200  # and the redirect still completes it
+    assert store.has_credentials("m365", f"user:{PERSON}")
 
 
-def test_an_unfinished_browser_sign_in_stops_showing_once_it_expires(hive, guarded_url, fake_authority, monkeypatch):
-    """A browser sign-in nobody finishes leaves the view when its address expires, as an expired device
-    code does, instead of staying "in progress" until the next connect."""
+def test_a_connection_that_sends_no_request_holds_up_no_sign_in(hive, guarded_url, fake_authority, monkeypatch):
+    """Each connection to the listener is served on its own, for a few seconds at most: one that connects and
+    sends nothing is dropped, one that stops halfway through its request gets the error page, and neither
+    keeps the browser's redirect waiting."""
+    oauth = hive.program.oauth_mod
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    started, query = browser_sign_in(hive, "s1", "m365")
+    port = urlsplit(query["redirect_uri"]).port
+    monkeypatch.setattr(oauth, "REQUEST_SECONDS", 0.5)
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as silent, \
+            socket.create_connection(("127.0.0.1", port), timeout=10) as halfway:
+        halfway.sendall(b"GET /?state=")
+        assert silent.recv(1) == b""  # closed without an answer
+        assert halfway.recv(65536).startswith(b"HTTP/1.1 400 ")
+    monkeypatch.setattr(oauth, "REQUEST_SECONDS", 60.0)
+    with socket.create_connection(("127.0.0.1", port), timeout=10):  # silent for longer than a browser waits
+        assert browse(fake_authority.authorize(started["detail"]["authorization_url"]))[0] == 200
+    assert "signed in by" in signin_text(hive)
+
+
+def test_a_browser_sign_in_that_ends_with_an_error_is_traced_and_closed(hive, guarded_url, fake_authority):
+    """Microsoft sends the browser back with an error (the person declined, say), or refuses the code when the
+    app trades it: the failure goes to the trace, the browser gets a fixed page that repeats none of it, and
+    the listener closes. Signing in then takes a new connect."""
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    store = hive.program.store_mod.SwarmStore("s1")
+    started, query = browser_sign_in(hive, "s1", "m365")
+    landed = fake_authority.authorize(started["detail"]["authorization_url"])
+    status, page = browse(f"{query['redirect_uri']}/?error=access_denied&error_description=AADSTS65004%3A+User+"
+                          f"declined+to+consent.&state={query['state']}")
+    assert status == 400 and "did not complete" in page
+    assert "access_denied" not in page and "AADSTS65004" not in page and query["state"] not in page
+    [declined] = store.traces(10)
+    assert (declined["action"], declined["status"], declined["actor"]) == ("connect", "error", f"person:{PERSON}")
+    assert "access_denied" in declined["reason"] and "AADSTS65004: User declined to consent." in declined["reason"]
+    assert signin_text(hive) == "Sign-in: oauth-device (not signed in)"
+    assert browse(landed) == (None, "")  # closed: a code that comes after the error goes nowhere
+    assert fake_authority.redemptions == []
+
+    started, query = browser_sign_in(hive, "s1", "m365")
+    status, same_page = browse(f"{query['redirect_uri']}/?code=ac-never-issued&state={query['state']}")
+    assert (status, same_page) == (400, page)
+    refused = store.traces(1)[0]
+    assert refused["status"] == "error" and "AADSTS70008" in refused["reason"]
+    assert len(fake_authority.redemptions) == 1 and store.signins("m365") == {}
+    assert signin_text(hive) == "Sign-in: oauth-device (not signed in)"
+    traced = json.dumps(store.traces(10))
+    assert "ac-never-issued" not in traced and query["state"] not in traced
+
+
+def test_a_browser_sign_in_nobody_finishes_expires(hive, guarded_url, fake_authority, monkeypatch):
+    """The listener waits ten minutes (here one second), then closes: the view stops showing the sign-in, as
+    it does for an expired device code, the trace says that nobody finished it, and a browser that comes back
+    late finds nothing there."""
     monkeypatch.setattr(hive.program.oauth_mod, "BROWSER_SIGNIN_SECONDS", 1)
     add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
-    started = run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {"flow": "browser"}, confirmed=True))
-    assert "in progress" in text_of(run(hive.view("s1", PERSON)), "server:m365")
-    for _ in range(50):
-        if "in progress" not in text_of(run(hive.view("s1", PERSON)), "server:m365"):
-            break
-        time.sleep(0.1)
-    assert "Sign-in: oauth-device (not signed in)" in text_of(run(hive.view("s1", PERSON)), "server:m365")
-    landed = fake_authority.authorize(started["detail"]["authorization_url"])
-    late = run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {"redirect_url": landed}, confirmed=True))
-    assert late["status"] == "refused" and fake_authority.redemptions == []
+    started, _ = browser_sign_in(hive, "s1", "m365")
+    assert started["detail"]["expires_in"] == 1 and "in progress" in signin_text(hive)
+    assert eventually(lambda: "in progress" not in signin_text(hive))
+    assert signin_text(hive) == "Sign-in: oauth-device (not signed in)"
+    [expired] = hive.program.store_mod.SwarmStore("s1").traces(10)
+    assert (expired["action"], expired["status"]) == ("connect", "error") and "nobody finished" in expired["reason"]
+    assert browse(fake_authority.authorize(started["detail"]["authorization_url"])) == (None, "")
+    assert fake_authority.redemptions == []
 
 
-def test_finishing_a_browser_sign_in_is_not_stale(hive, guarded_url, fake_authority):
-    """The connect that starts a browser sign-in changes the page (a sign-in in progress), so the one that
-    finishes it comes with an old base revision; it decides nothing from the page and goes through. Every
-    other connect still needs the page the person saw."""
+def test_a_new_connect_closes_the_persons_earlier_browser_sign_in(hive, guarded_url, fake_authority):
+    """One sign-in in progress per person and server: a person's new connect closes the listener of their
+    earlier one, whose address then completes nothing. A connect from a page that has changed is stale and
+    closes nothing. Another person's sign-in is their own: it goes on, and is kept under them."""
     add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
     seen = run(hive.view("s1", PERSON))["revision"]
+    first, first_query = browser_sign_in(hive, "s1", "m365")
+    stale = run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {"flow": "browser"}, confirmed=True,
+                                base_revision=seen))
+    assert stale["status"] == "stale"
+    assert browse(first_query["redirect_uri"] + "/favicon.ico")[0] == 400  # the first one still listens
+    theirs, _ = browser_sign_in(hive, "s1", "m365", person="bob")
+    second, second_query = browser_sign_in(hive, "s1", "m365")
+    assert second_query["state"] != first_query["state"]
+    assert browse(fake_authority.authorize(first["detail"]["authorization_url"], "ac-first")) == (None, "")
+    at_the_second = f"{second_query['redirect_uri']}/?code=ac-first&state={first_query['state']}"
+    assert browse(at_the_second)[0] == 400 and fake_authority.redemptions == []
+    assert f"a sign-in started by user:{PERSON}, user:bob is in progress" in signin_text(hive)
+    store = hive.program.store_mod.SwarmStore("s1")
+    fake_authority.access_token = NEW_TOKEN
+    assert browse(fake_authority.authorize(theirs["detail"]["authorization_url"], "ac-bob"))[0] == 200
+    assert set(store.signins("m365")) == {"user:bob"}
+    assert store.credentials("m365", "user:bob")["access_token"] == NEW_TOKEN
+    fake_authority.access_token = SECRET
+    assert browse(fake_authority.authorize(second["detail"]["authorization_url"]))[0] == 200
+    assert store.credentials("m365", f"user:{PERSON}")["access_token"] == SECRET
+    assert f"2 people signed in (user:{PERSON}, user:bob)" in signin_text(hive)
+    assert "in progress" not in signin_text(hive)
 
-    def connect(**params):
-        return run(hive.person_act("s1", PERSON, "connect", ["server:m365"], params, confirmed=True, base_revision=seen))
 
-    started = connect(flow="browser")
-    assert started["status"] == "needs_input" and run(hive.view("s1", PERSON))["revision"] != seen
-    assert connect(flow="browser")["status"] == "stale"
-    landed = fake_authority.authorize(started["detail"]["authorization_url"])
-    assert connect(redirect_url=landed)["status"] == "done"
+def test_a_device_code_connect_closes_the_persons_browser_sign_in_too(hive, guarded_url, fake_authority):
+    fake_authority.pending_polls = 0
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    started, _ = browser_sign_in(hive, "s1", "m365")
+    sign_in(hive, "s1", "m365")  # the same person, with the device code
+    assert browse(fake_authority.authorize(started["detail"]["authorization_url"])) == (None, "")
+    assert fake_authority.redemptions == [] and "signed in by" in signin_text(hive)
+
+
+def test_removing_a_server_closes_its_browser_sign_ins(hive, guarded_url, fake_authority):
+    """A browser sign-in in progress ends with its server: no token comes later for a server that is gone, or
+    for another one added under its name."""
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    started, _ = browser_sign_in(hive, "s1", "m365")
+    assert run(hive.person_act("s1", PERSON, "remove-server", ["server:m365"], {}, confirmed=True))["status"] == "done"
+    assert browse(fake_authority.authorize(started["detail"]["authorization_url"])) == (None, "")
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    assert signin_text(hive) == "Sign-in: oauth-device (not signed in)"
+    assert fake_authority.redemptions == [] and hive.program.store_mod.SwarmStore("s1").signins("m365") == {}
+
+
+def test_a_sign_in_whose_server_is_removed_while_it_finishes_is_not_kept(hive, guarded_url, fake_authority,
+                                                                         monkeypatch):
+    """The browser is back and the app is trading the code when the server is removed: the tokens that then
+    come are dropped, and the browser gets the error page."""
+    oauth = hive.program.oauth_mod
+    finish = oauth.finish_browser_flow
+
+    def removed_meanwhile(*args):
+        token = finish(*args)
+        removed = run(hive.person_act("s1", PERSON, "remove-server", ["server:m365"], {}, confirmed=True))
+        assert removed["status"] == "done"
+        return token
+
+    monkeypatch.setattr(oauth, "finish_browser_flow", removed_meanwhile)
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    started, _ = browser_sign_in(hive, "s1", "m365")
+    status, page = browse(fake_authority.authorize(started["detail"]["authorization_url"]))
+    assert status == 400 and "did not complete" in page and len(fake_authority.redemptions) == 1
+    store = hive.program.store_mod.SwarmStore("s1")
+    assert store.signins("m365") == {} and store.servers() == {}
+    closed = store.traces(1)[0]
+    assert (closed["action"], closed["status"]) == ("connect", "error") and "its server was removed" in closed["reason"]
+
+
+def test_the_listener_gives_up_after_too_many_requests(hive, guarded_url, fake_authority, monkeypatch):
+    """Requests that are not the redirect do not end the wait, up to a limit (here three). One more and the
+    listener closes, with the reason in the trace."""
+    monkeypatch.setattr(hive.program.oauth_mod, "MAX_REQUESTS", 3)
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    started, query = browser_sign_in(hive, "s1", "m365")
+    icon = query["redirect_uri"] + "/favicon.ico"
+    assert [browse(icon)[0] for _ in range(3)] == [400, 400, 400]
+    assert "in progress" in signin_text(hive)
+    assert browse(icon) == (None, "")
+    assert eventually(lambda: "in progress" not in signin_text(hive))
+    [gave_up] = hive.program.store_mod.SwarmStore("s1").traces(10)
+    assert (gave_up["action"], gave_up["status"]) == ("connect", "error") and "too many requests" in gave_up["reason"]
+    assert browse(fake_authority.authorize(started["detail"]["authorization_url"])) == (None, "")
+    assert fake_authority.redemptions == []
+
+
+def test_the_listener_is_on_the_loopback_interface_only(hive, guarded_url, fake_authority):
+    """127.0.0.1 and, where the machine has it, ::1 on the same port, since a browser may take localhost for
+    either; never an address that another machine can reach."""
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    _, query = browser_sign_in(hive, "s1", "m365")
+    port = urlsplit(query["redirect_uri"]).port
+    listener = hive.program._PENDING_SIGNINS[("s1", "m365", f"user:{PERSON}")]["listener"]
+    bound = {sock.getsockname()[:2] for sock in listener._sockets}
+    assert bound == ({("127.0.0.1", port), ("::1", port)} if ipv6_loopback() else {("127.0.0.1", port)})
+    for host, _ in bound:
+        assert browse(f"http://{f'[{host}]' if ':' in host else host}:{port}/favicon.ico")[0] == 400
+
+
+def test_the_listener_takes_no_port_held_on_the_other_loopback_address(program, monkeypatch):
+    """A port that another program holds on ::1 is not used: a browser that takes localhost for ::1 would hand
+    that program the code. A machine without ::1 gets a listener on 127.0.0.1 alone."""
+    oauth, listen = program.oauth_mod, program.oauth_mod._listen
+    held = []
+
+    def first_port_held(family, host, port):  # on ::1, by another program
+        if family == socket.AF_INET6 and port in (held or [port]):
+            held[:] = [port]
+            raise OSError(errno.EADDRINUSE, "Address already in use")
+        return listen(family, host, port)
+
+    monkeypatch.setattr(oauth, "_listen", first_port_held)
+    listener = oauth.LoopbackListener()
+    try:
+        assert listener.port != held[0] and listener.redirect_uri == f"http://localhost:{listener.port}"
+        with pytest.raises(ConnectionRefusedError):  # the port it gave up is closed again
+            socket.create_connection(("127.0.0.1", held[0]), timeout=5)
+    finally:
+        listener.close()
+
+    def without_ipv6(family, host, port):
+        if family == socket.AF_INET6:
+            raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+        return listen(family, host, port)
+
+    monkeypatch.setattr(oauth, "_listen", without_ipv6)
+    listener = oauth.LoopbackListener()
+    try:
+        assert [sock.getsockname()[:2] for sock in listener._sockets] == [("127.0.0.1", listener.port)]
+    finally:
+        listener.close()
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", listener.port), timeout=5)
 
 
 # ------------------------------------------------------------------ token renewal

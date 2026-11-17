@@ -129,8 +129,19 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
   Fernet, newest half kept past 1 MiB; a plain intents.json is moved in).
   Files mode 0600.
 - `connect/oauth.py`: RFC 8628 device flow, and authorization code with PKCE
-  (RFC 7636) finished by the address the browser lands on, for tenants that
-  block the device code; standard library only; authority
+  (RFC 7636) on a loopback redirect (RFC 8252 7.3), for tenants that block
+  the device code. `LoopbackListener` listens for one sign-in on 127.0.0.1
+  and, where the machine has it, ::1, on one port the system picks; the
+  redirect URI is `http://localhost:<port>` (the Entra registration lists
+  `http://localhost` under Mobile and desktop applications; Entra ignores the
+  port). One thread waits, 10 minutes and 50 requests at most, and each
+  connection gets a thread of its own. Only a GET for `/` with the sign-in's
+  state (constant-time comparison) ends the wait, once; every answer is one
+  of three fixed pages, and nothing of a request is logged or sent back (the
+  request line carries the code). `_browser_signin` in program.py trades the
+  code in the listener's thread, keeps the sign-in under the person who ran
+  connect and traces the outcome; a later connect of theirs on that server,
+  or remove-server, closes the listener. Standard library only; authority
   overridable with `OMEGA_CONNECT_OAUTH_AUTHORITY` (tests use a fake). Keeps
   only `preferred_username` from the id_token, to show who signed in.
   Renewal runs in a thread under a lock per (swarm, server), in program.py.
@@ -141,9 +152,9 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
   per run, device code or browser sign-in, the approval asked in the terminal,
   output filtered of tokens);
   `test_demo.py` drives it as a person would, with Graph and sign-in simulated.
-  `terminal_input.py` holds what both demos ask at the terminal with; the
-  address pasted after a browser sign-in is read key by key without echo
-  (line mode stops at 1,024 bytes on macOS, and the address carries a code).
+  `terminal_input.py` holds what both demos ask at the terminal with. With
+  the browser sign-in both demos open the sign-in page and wait for the view
+  to name who signed in: the browser goes back to the app, not to the demo.
   `hive_demo.py` is the demo on a real hive (the Mac test build): it makes the
   mind's calls with the mind's token, and the person's steps that the hive's
   pages cannot send (add-server, connect with the browser sign-in) with the
@@ -159,15 +170,18 @@ definition digest still matches the accepted one; every tool of a new server
 is write until then. The owner can demote (write, hidden, back to default),
 never promote. The digest catches definition changes, not behaviour changes.
 The device code and the browser sign-in address go only into the `connect`
-result, never into `view()`; only the person who started a browser sign-in
-can finish it.
+result, never into `view()`. The app finishes a browser sign-in by itself,
+when the browser comes back to its listener with the sign-in's state, and
+keeps it under the person who ran connect. That works with the person's
+browser on the hive's machine; a hive shared over a network needs a callback
+address of the hive, not done yet.
 
 ## Commands
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests            # 83 tests, ~90 s, localhost only
-python -m pytest -q examples/teams-mcp   # 52 tests, ~45 s, Graph and the hive's routes simulated
+python -m pytest -q tests            # 91 tests, ~2 min, localhost only
+python -m pytest -q examples/teams-mcp   # 53 tests, ~1 min, Graph and the hive's routes simulated
 ```
 
 Contract checker, from the pre-release copy next to this repo (until omegahive
@@ -180,6 +194,9 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
 
 - Never put a credential in a result, view, trace, log line or error. New
   outputs that can carry server text go through `_scrub` / `engine.redact`.
+- The sign-in listener answers with its fixed pages only, and nothing of a
+  request reaches a log, a trace or an error: the request line carries the
+  code. It never listens beyond the loopback interface.
 - Never store tool content in clear: traces hold digests only, and
   use-tool's records (its answers, for retries) are encrypted.
 - Keep `describe()` sync and cheap. Keep `view()` deterministic: no network,
@@ -225,8 +242,17 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
    build in `~/OmegaHive` (MesTTo on #2: its owner is a named person), which
    loads it and whose `programs_check` passes; `examples/teams-mcp/hive_demo.py`
    plays the mind's part there (README of the example, "On a scratch hive").
-   Not yet run against the real hive or the tenant: that run is Alessio's.
-4. Optional: the mind skill for native Omega minds wrapping
-   `POST /api/agent/programs/omega-connect/act` (confirm with the team first).
-   A standalone MeTTa plugin that calls MCP directly from Omega core already
-   exists in the separate `omega-mcp` folder and was tested end to end in Omega.
+   Same day, branch `loopback-signin`, 0.3.0 (asked for by MesTTo on #2, who
+   reviews it): on the real tenant the browser sign-in never got its code,
+   since Microsoft took it out of the address the browser landed on
+   (`/common/wrongplace`), so the app now finishes that sign-in on a loopback
+   listener, and the app registration needs the redirect URI
+   `http://localhost` under Mobile and desktop applications. The hive loads
+   the app when it starts: restart it before the demo. Not yet run against
+   the real hive or the tenant: that run is Alessio's.
+
+Not a step here: the mind skill for native Omega minds is the flagship team's
+(MesTTo on #2: it covers the actions of every app and takes a request up again
+after an approval). A standalone MeTTa plugin that calls MCP directly from
+Omega core exists in the separate `omega-mcp` folder and was tested end to end
+in Omega.

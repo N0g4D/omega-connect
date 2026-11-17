@@ -19,13 +19,15 @@ connect with the browser sign-in. It also makes the demo mind and its three rule
 since the mind's token is returned only by the request that creates it.
 
 Your session comes from a one-time link (omegahive.sh signin-url) and is ended when
-the script stops. That link, your session's token, the mind's token, the hive's
-confirm tokens and the address your browser lands on after the Microsoft sign-in
-stay in this process's memory: they are never printed or written anywhere, and the
-address is not shown as you paste it. With --device-code the sign-in is the device
-code: its address and user code, which are for you, are shown. The tenant ID and
-the client ID are asked only when the server is not in the hive yet, and shown by
-their first characters.
+the script stops. That link, your session's token, the mind's token and the hive's
+confirm tokens stay in this process's memory: they are never printed or written
+anywhere. The Microsoft sign-in happens in your browser, which the script opens;
+from there the browser goes back to the app, inside the hive on this machine, and
+the script waits for the app's view to name who signed in: no code of that sign-in
+reaches the script. With --device-code the sign-in is the device code: its address
+and user code, which are for you, are shown. The tenant ID and the client ID are
+asked only when the server is not in the hive yet, and shown by their first
+characters.
 Standard library only, with terminal_input.py beside it, so any Python 3.10+ runs it.
 """
 
@@ -46,11 +48,11 @@ import urllib.request
 import uuid
 import webbrowser
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import quote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from terminal_input import UNSAFE, Stop, ask, ask_hidden, ask_id  # noqa: E402
+from terminal_input import UNSAFE, Stop, ask, ask_id  # noqa: E402
 
 APP_ID = "omega-connect"
 SERVER_NAME = "teams"
@@ -476,9 +478,10 @@ class HiveDemo:
         self.say(f"✓ {result['message']}", 2)
 
     def connect(self) -> None:
-        """connect with the browser sign-in (authorization code with PKCE). The app's page can only
-        send connect without parameters, which is the device code; a tenant whose security defaults
-        block that code needs {"flow": "browser"}, so the script sends it."""
+        """connect with the browser sign-in (authorization code with PKCE; the app, inside the hive,
+        listens on this machine for the browser to come back, and finishes the sign-in by itself).
+        The app's page can only send connect without parameters, which is the device code; a tenant
+        whose security defaults block that code needs {"flow": "browser"}, so the script sends it."""
         self.step("connect", f"you, confirmed here: the {'device code' if self.device_code else 'browser sign-in'}")
         state = self.signin_line()
         if "signed in by" in state:
@@ -492,44 +495,31 @@ class HiveDemo:
             return
         self.call_line("connect", {"flow": "browser"}, [f"server:{SERVER_NAME}"])
         started = self.person_act("connect", [f"server:{SERVER_NAME}"], {"flow": "browser"})
-        if started.get("status") == "done":  # the answer of another sign-in, whose message is not for this screen
-            self.say("✗ connect did not start a browser sign-in.", 2)
+        detail = started.get("detail") or {}
+        if started.get("status") == "needs_input" or (started.get("status") == "done"
+                                                      and not detail.get("authorization_url")):
+            # The answer of another sign-in, whose message is not for this screen: a device code, or the
+            # address that omega-connect 0.2 wanted pasted back.
+            self.say("✗ connect did not start a browser sign-in that finishes by itself. A hive started before "
+                     "this checkout changed still runs the app it loaded then: restart the hive and run the demo "
+                     "again.", 2)
             raise Stop
-        if started.get("status") != "needs_input":
-            self.need(started, "connect", HINT)  # says why, then stops
-        detail = started["detail"]
+        self.need(started, "connect", HINT)  # an error or a refusal: says why, then stops
         if open_in_browser(detail["authorization_url"]):
             self.say("The sign-in page is open in your browser (its address carries the tenant and client IDs, "
                      "so it is not printed here).", 2)
         else:
-            self.say("No browser opens from here. Open this address in one; it carries the tenant and client "
-                     "IDs in full, so pause a recording first:", 2)
+            self.say("No browser opens from here. Open this address in a browser on this machine; it carries the "
+                     "tenant and client IDs in full, so pause a recording first:", 2)
             self.say(detail["authorization_url"], 4)
-        self.say("Sign in with an account of the tenant and accept the permissions. The browser then lands on an "
-                 f"empty page whose address starts with {detail['redirect_uri']}: copy that whole address.", 2)
-        while True:
-            landed = ask_hidden("  Paste the address the browser landed on (it is not shown; Enter alone stops): ")
-            if not landed:
-                raise Stop
-            # The code in it works once, with the app's PKCE verifier; still, it never reaches the screen.
-            self.secrets.update(code for code in parse_qs(urlsplit(landed).query).get("code", []) if len(code) >= 16)
-            self.say(f"({len(landed):,} characters received)", 2)
-            self.call_line("connect", {"redirect_url": "<the address you pasted>"}, [f"server:{SERVER_NAME}"])
-            finished = self.person_act("connect", [f"server:{SERVER_NAME}"], {"redirect_url": landed})
-            if finished.get("status") == "done":
-                break
-            self.say(f"✗ {finished.get('message', '')}", 2)
-            if finished.get("status") != "error":  # refused: no sign-in is waiting any more (expired)
-                self.say(HINT, 2)
-                raise Stop
-            self.say("The sign-in is still open: paste the address again, or sign in again from the same page.", 2)
-        self.say(f"✓ In the view: {self.signin_line()}", 2)
-        self.say("The token stays encrypted in the app's store; the view shows neither the token nor the code.", 2)
+        self.say("Sign in with an account of the tenant and accept the permissions. The browser then says "
+                 "\"You are signed in\", and the demo goes on by itself.", 2)
+        self.wait_for_signin("the sign-in in your browser", detail.get("expires_in"))
 
     def connect_with_device_code(self) -> None:
         """--device-code: connect without a flow. The app answers with an address and a user code, which
         are for the person and so are shown, and finishes the sign-in by itself once they have entered
-        the code; the script waits for the view to name who signed in."""
+        the code."""
         self.call_line("connect", {}, [f"server:{SERVER_NAME}"])
         started = self.need(self.person_act("connect", [f"server:{SERVER_NAME}"], {}), "connect", HINT)
         detail = started.get("detail") or {}
@@ -540,16 +530,21 @@ class HiveDemo:
         self.say(f"Code    {detail['user_code']}", 2)
         self.say("Enter the code there, sign in with an account of the tenant and accept the permissions; "
                  "the demo goes on by itself.", 2)
+        self.wait_for_signin("the sign-in with the code", detail.get("expires_in"))
 
+    def wait_for_signin(self, what: str, expires_in) -> None:
+        """The app finishes a sign-in by itself: waits until its view names who signed in. A connect
+        that the app traced as failed in this run stops the demo."""
         def signed_in():
             if any(call.get("status") == "error" for call in self.calls("connect")):
-                self.say("✗ The sign-in failed: it was declined, or the code expired. The app's trace keeps why.", 2)
+                self.say("✗ The sign-in failed: it was declined, or not finished in time. The app's trace keeps "
+                         "why.", 2)
                 self.say(HINT, 2)
                 raise Stop
             line = self.signin_line()
             return line if "signed in by" in line else None
 
-        line = self.wait_for("the sign-in with the code", int(detail.get("expires_in") or 900) + 5, signed_in)
+        line = self.wait_for(what, int(expires_in or 900) + 5, signed_in)
         self.say(f"✓ In the view: {line}", 2)
         self.say("The token stays encrypted in the app's store; the view shows neither the token nor the code.", 2)
 
@@ -795,7 +790,8 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"the swarm of the demo, made if you have none of that name (default: {SWARM_NAME!r})")
     parser.add_argument("--device-code", action="store_true",
                         help="sign in with a device code (an address and a code to enter there) in place of the "
-                             "browser sign-in, whose landing address Microsoft Entra does not let a browser keep")
+                             "browser sign-in; a tenant whose security defaults block the device code needs the "
+                             "browser")
     parser.add_argument("--no-signin", action="store_true",
                         help="for a stand-in server that needs no Microsoft sign-in (rehearsals and tests): "
                              "add-server without one, and no connect")

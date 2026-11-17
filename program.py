@@ -29,6 +29,10 @@ What the app guarantees on its side
   read at call time and go only to the addresses the operator lists for them;
   OAuth tokens are encrypted at rest. Neither appears in results, views,
   traces, logs or errors.
+- A browser sign-in is finished on a listener of the app, on the loopback
+  interface only and for that sign-in alone. Only the request that carries
+  the sign-in's state completes it, and nothing of a request to it is logged
+  or sent back.
 - Tool output is returned as data, capped in size, and labelled untrusted.
 - A write is sent again only when it certainly did not run (a refused
   connection, a session that ended before the call went out, a 404 for a
@@ -90,7 +94,8 @@ IDENTITY_SCOPES = ("openid", "profile", "offline_access")
 # The host refuses a view with more items than this (hive/core/programs.py, MAX_ITEMS).
 MAX_ITEMS_IN_VIEW = 400
 MAX_CALLS_IN_VIEW = 30
-# (swarm, server, principal) -> a sign-in that person started; never its code
+# (swarm, server, principal) -> a sign-in that person started; never its code. A browser sign-in also
+# keeps its listener here, which a later connect of theirs, or the removal of the server, closes.
 _PENDING_SIGNINS: dict[tuple[str, str, str], dict] = {}
 _SIGNIN_LOCK = threading.Lock()
 # one token renewal at a time per (swarm, server, principal)
@@ -711,10 +716,7 @@ async def act(ctx, action, items, params):
             return await _call_tool(ctx, swarm, store, action, items, params)
         if action in ("add-server", "remove-server", "accept-reads", "reclass-tool", "connect", "revoke"):
             base = params.get("base_revision")
-            # Finishing one's own browser sign-in decides nothing from the page, and the connect that
-            # started it changed the page (a sign-in in progress), so its base is always an old one.
-            finishing = action == "connect" and params.get("redirect_url") is not None
-            if base is not None and base != _revision(swarm, store) and not finishing:
+            if base is not None and base != _revision(swarm, store):
                 return _result("stale", "the page changed; look again before changing servers",
                                graph=view(ctx, None, "unfold"))
             handler = {"add-server": _add_server, "remove-server": _remove_server, "accept-reads": _accept_reads,
@@ -1042,6 +1044,12 @@ def _add_server(ctx, swarm, store, items, params):
 
 def _remove_server(ctx, swarm, store, items, params):
     record, _ = _target(store, items, params, need_tool=False)
+    with _SIGNIN_LOCK:  # a browser sign-in in progress ends with its server: no token comes for it later
+        waiting = [key for key, pending in _PENDING_SIGNINS.items()
+                   if key[:2] == (swarm, record["name"]) and pending.get("listener")]
+        listeners = [_PENDING_SIGNINS.pop(key)["listener"] for key in waiting]
+    for listener in listeners:
+        listener.close()
     ENGINE.forget(swarm, record["name"])
     store.remove_server(record["name"])
     store.trace({"action": "remove-server", "server": record["name"], "tool": None,
@@ -1098,36 +1106,15 @@ async def _connect(ctx, swarm, store, items, params):
     store_mod._fernet()  # fail now, not after the person signs in, if tokens cannot be stored
     person, actor = _principal(ctx), _actor(ctx)  # whose sign-in it is; who the trace names
     key = (swarm, record["name"], person)
-    if params.get("redirect_url") is not None:
-        return await _finish_browser_signin(swarm, store, record, person, actor, str(params["redirect_url"]))
     flow = params.get("flow", "device")
     if flow == "browser":
-        signin = oauth_mod.start_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"])
-        pending = {"by": person, "browser": signin}  # the address goes only to this person
-        with _SIGNIN_LOCK:
-            _PENDING_SIGNINS[key] = pending
-
-        def expire():  # as the device code's thread does when its code expires
-            with _SIGNIN_LOCK:
-                if _PENDING_SIGNINS.get(key) is pending:  # not a later connect's
-                    _PENDING_SIGNINS.pop(key)
-
-        timer = threading.Timer(max(signin.expires_at - time.time(), 0), expire)
-        timer.daemon = True
-        timer.start()
-        return _result("needs_input",
-                       f"Open {signin.url} and sign in. Your browser then lands on an address starting with "
-                       f"{signin.redirect_uri} (the page stays empty). Run connect again with that whole address "
-                       f"as redirect_url, within {oauth_mod.BROWSER_SIGNIN_SECONDS // 60} minutes.",
-                       needs={"redirect_url": "the whole address your browser lands on after you sign in"},
-                       detail={"authorization_url": signin.url, "redirect_uri": signin.redirect_uri,
-                               "expires_in": oauth_mod.BROWSER_SIGNIN_SECONDS})
+        return _browser_signin(swarm, store, record, person, actor)
     if flow != "device":
-        return _refused("flow must be device (a code to enter) or browser (an address to paste back)")
+        return _refused("flow must be device (a code to enter) or browser (an address to open in a browser on "
+                        "the hive's machine)")
     code = oauth_mod.start_device_flow(auth["tenant"], auth["client_id"], auth["scopes"])
     pending = {"by": person}  # the code goes only to this person, in the result below
-    with _SIGNIN_LOCK:
-        _PENDING_SIGNINS[key] = pending
+    _signin_started(key, pending)
 
     def wait():
         try:
@@ -1143,9 +1130,7 @@ async def _connect(ctx, swarm, store, items, params):
             store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor,
                          "status": "error", "reason": getattr(exc, "message", exc.__class__.__name__)[:200]})
         finally:
-            with _SIGNIN_LOCK:
-                if _PENDING_SIGNINS.get(key) is pending:  # not a later connect's
-                    _PENDING_SIGNINS.pop(key)
+            _signin_over(key, pending)
 
     threading.Thread(target=wait, name=f"omega-connect-signin-{record['name']}", daemon=True).start()
     return _result("done", f"Open {code.verification_uri} and enter the code {code.user_code} to sign in. "
@@ -1154,39 +1139,89 @@ async def _connect(ctx, swarm, store, items, params):
                            "expires_in": int(code.expires_at - time.time())})
 
 
-async def _finish_browser_signin(swarm, store, record, person, actor, landed):
-    """The person pastes the address their browser landed on. A wrong or failed paste leaves the sign-in
-    open until it expires, so they can sign in again from the same address and paste the new one."""
-    key = (swarm, record["name"], person)
+def _signin_started(key: tuple[str, str, str], pending: dict) -> None:
+    """A person's sign-in to a server becomes the one in progress. An earlier one of theirs that waits
+    for a browser is closed: its address completes nothing from here on."""
     with _SIGNIN_LOCK:
-        pending = _PENDING_SIGNINS.get(key)
-    signin = (pending or {}).get("browser")
-    if signin is None or pending["by"] != person:
-        return _refused("no browser sign-in of yours is waiting for this server; run connect with flow browser first")
-    if time.time() > signin.expires_at:
-        with _SIGNIN_LOCK:
-            if _PENDING_SIGNINS.get(key) is pending:
-                _PENDING_SIGNINS.pop(key)
-        return _refused("that sign-in expired; run connect with flow browser again")
-    auth = record["auth"]
-    # The identity provider is called in a thread, so the hive's event loop keeps running.
-    try:
-        token = await asyncio.to_thread(oauth_mod.finish_browser_flow, auth["tenant"], auth["client_id"],
-                                        auth["scopes"], signin, landed)
-    except oauth_mod.OAuthError as exc:
-        store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor,
-                     "status": "error", "reason": exc.message[:200]})
-        raise
-    token["person"] = person
-    # As for the device code: close the old session before the new token is visible.
-    ENGINE.forget(swarm, record["name"])
-    store.put_credentials(record["name"], person, token)
+        earlier = _PENDING_SIGNINS.get(key)
+        _PENDING_SIGNINS[key] = pending
+    if earlier and earlier.get("listener"):
+        earlier["listener"].close()
+
+
+def _signin_in_progress(key: tuple[str, str, str], pending: dict) -> bool:
+    """Whether this sign-in is still the one in progress: no later connect has taken its place, and
+    its server is still there."""
     with _SIGNIN_LOCK:
-        if _PENDING_SIGNINS.get(key) is pending:
+        return _PENDING_SIGNINS.get(key) is pending
+
+
+def _signin_over(key: tuple[str, str, str], pending: dict) -> None:
+    with _SIGNIN_LOCK:
+        if _PENDING_SIGNINS.get(key) is pending:  # not a later connect's
             _PENDING_SIGNINS.pop(key)
-    store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor, "status": "done"})
-    account = engine_mod.clean_text(token.get("account"), 120)
-    return _result("done", f"signed in to '{record['name']}'" + (f" as {account}" if account else ""))
+
+
+def _browser_signin(swarm, store, record, person, actor):
+    """connect with flow browser (RFC 8252, 7.3). The app listens on a free port of the loopback
+    interface of the hive's machine, the person signs in at the address in the result, and their
+    browser comes back to http://localhost:<port> with a code, which the app trades for the tokens it
+    keeps under that person. As with the device code, the sign-in completes on its own: here in a
+    thread of the listener, which closes when the wait ends, whichever way."""
+    auth, key = record["auth"], (swarm, record["name"], person)
+    listener = oauth_mod.LoopbackListener()
+    signin = oauth_mod.start_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"], listener.redirect_uri)
+    pending = {"by": person, "listener": listener}  # the address goes only to this person, in the result below
+
+    def trace(failure: BaseException | None = None, code: str | None = None) -> None:
+        entry = {"action": "connect", "server": record["name"], "tool": None, "actor": actor, "status": "done"}
+        if failure is not None:
+            # The identity platform's own words, or only the type of an error that is not its own;
+            # never the code, nor what the address of the sign-in carries.
+            reason = engine_mod.clean_text(getattr(failure, "message", failure.__class__.__name__), 200)
+            hidden = tuple(value for value in (code, signin.state, signin.verifier) if value)
+            entry.update(status="error", reason=engine_mod.redact(reason, hidden))
+        store.trace(entry)
+
+    def landed(code: str | None, failure) -> bool:
+        """The browser came back with this sign-in's state: with a code, or with the failure that the
+        identity platform sent in its place. True once the person is signed in."""
+        try:
+            if failure is not None:
+                raise failure
+            # The identity provider is called here, in a thread of the listener: the hive's event loop keeps running.
+            token = oauth_mod.finish_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"], signin, code)
+            token["person"] = person
+            if not _signin_in_progress(key, pending):
+                raise oauth_mod.OAuthError("closed", "the sign-in was closed while it finished: a later connect took "
+                                                     "its place, or its server was removed")
+            # As for the device code: close the old session before the new token is visible.
+            ENGINE.forget(swarm, record["name"])
+            store.put_credentials(record["name"], person, token)
+            trace()
+            return True
+        except Exception as exc:
+            trace(exc, code)
+            return False
+        finally:
+            _signin_over(key, pending)
+
+    def ended(failure) -> None:
+        """Nobody finished the sign-in in time, or the listener gave up."""
+        try:
+            trace(failure)
+        finally:
+            _signin_over(key, pending)
+
+    # The listener starts before the sign-in is registered: until the result below is out, nobody has
+    # the address that could bring a browser to it.
+    listener.start(signin.state, landed, ended, oauth_mod.BROWSER_SIGNIN_SECONDS)
+    _signin_started(key, pending)
+    return _result("done", f"Open {signin.url} in a browser on the hive's machine and sign in, within "
+                           f"{oauth_mod.BROWSER_SIGNIN_SECONDS // 60} minutes. The connection completes on its own "
+                           "once you have.",
+                   detail={"authorization_url": signin.url, "redirect_uri": signin.redirect_uri,
+                           "expires_in": oauth_mod.BROWSER_SIGNIN_SECONDS})
 
 
 def _revoke(ctx, swarm, store, items, params):

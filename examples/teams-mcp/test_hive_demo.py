@@ -24,10 +24,8 @@ import hashlib
 import importlib.util
 import json
 import os
-import pty
 import re
 import secrets
-import select
 import socket
 import subprocess
 import sys
@@ -65,7 +63,6 @@ TEAM, CHANNEL = demo_tests.TEAM, demo_tests.CHANNEL
 OWNER = "ada"  # the hive's owner: a named person, user:ada
 READS = ["GET /me/joinedTeams", f"GET /teams/{TEAM}/channels", f"GET /teams/{TEAM}/channels/{CHANNEL}/messages"]
 POST = f"POST /teams/{TEAM}/channels/{CHANNEL}/messages"
-LANDING = "/common/oauth2/nativeclient"
 
 
 def serve_stand_in(argv: list[str]) -> None:
@@ -473,6 +470,9 @@ def hive(program, platform, tmp_path, monkeypatch):
     yield routes
     routes.close()
     program.ENGINE.shutdown()
+    for pending in list(program._PENDING_SIGNINS.values()):
+        if pending.get("listener"):
+            pending["listener"].close()  # a browser sign-in that a stopped run left waiting
 
 
 class Teams:
@@ -573,17 +573,14 @@ def start(hive, tmp_path):
         run.stop()
 
 
-def sign_in(run: HiveDemoRun, platform, first: str | None = None) -> None:
-    """The person's part of connect: yes, then the address their browser lands on after the sign-in
-    (after `first`, a wrong one, when given)."""
+def sign_in(run: HiveDemoRun, platform) -> None:
+    """The person's part of connect: yes at the terminal, then the sign-in in the browser the script
+    opened, which comes back to the app's listener on this machine."""
     run.expect("with your Microsoft account? (y/n): ")
     run.send("y")
-    run.expect("Paste the address the browser landed on")
-    landed = demo_tests.authorize(platform, run.browser_address())
-    if first:
-        run.send(landed.replace(LANDING, first))
-        run.expect("Paste the address the browser landed on")
-    run.send(landed)
+    run.expect("the demo goes on by itself.")
+    status, page = demo_tests.browse(demo_tests.authorize(platform, run.browser_address()))
+    assert status == 200 and "You can close this page" in page
 
 
 def shown_nowhere(run: HiveDemoRun, hive: HiveRoutes, *more: str) -> None:
@@ -664,7 +661,9 @@ def test_the_mind_reads_and_posts_only_after_the_person_approves_in_the_hive(sta
     # connect went through the host's confirm, like add-server; accept-reads and the approval came from the page.
     script = [r for r in hive.requests if r["bearer"] != page.token]
     confirmed = [r["body"]["action"] for r in script if r["path"].endswith("/confirm")]
-    assert confirmed == ["add-server", "connect", "connect"]
+    assert confirmed == ["add-server", "connect"]
+    connects = [r["body"]["params"] for r in script if r["path"].endswith("/act") and r["body"]["action"] == "connect"]
+    assert connects == [{"flow": "browser"}]  # one act: the app finished the sign-in by itself
     assert not [r for r in script if r["path"].startswith("/api/approvals/")]
     assert hive.sessions == {page.token}  # the script's session is ended; the page's is the person's own
 
@@ -695,17 +694,17 @@ def test_here_the_script_sends_the_persons_steps_and_a_second_run_finds_them_don
     ID, and replaces the mind of the first, whose token nobody holds any more."""
     run = start("--server-url", teams.url)
     run.send(TENANT, CLIENT_ID, "y")
-    sign_in(run, platform, first="/elsewhere")  # a wrong address is asked again
+    sign_in(run, platform)
     run.expect("Where [1]: ")
     run.send("2", "1", "First", "2", "maybe", "y")  # anything but y or n asks again
     assert run.finish() == 0
     out = run.output
-    assert "✗ paste the whole address the browser landed on" in out and "The sign-in is still open" in out
-    assert "→ accept-reads server:teams" in out and "✓ Posted in Teams" in out and "waiting for" not in out
+    assert "→ accept-reads server:teams" in out and "✓ Posted in Teams" in out
+    assert "waiting for" not in out.replace("… waiting for the sign-in in your browser", "")
     assert teams.graph() == READS + [POST]
     [first_mind] = hive.live_minds()
     confirmed = [r["body"]["action"] for r in hive.requests if r["path"].endswith("/confirm")]
-    assert confirmed == ["add-server", "connect", "connect", "connect", "accept-reads"]
+    assert confirmed == ["add-server", "connect", "accept-reads"]
     shown_nowhere(run, hive, TENANT, CLIENT_ID)
 
     again = start("--server-url", teams.url)
@@ -752,7 +751,7 @@ def test_with_device_code_the_code_is_shown_and_the_demo_waits_for_the_sign_in(s
     assert run.finish() == 0
     out = run.output
     assert "you, confirmed here: the device code" in out and "✓ Posted in Teams" in out and "Demo complete." in out
-    assert "Paste the address" not in out and run.browser_address() is None
+    assert "The sign-in page is open" not in out and run.browser_address() is None
     assert teams.graph() == READS + [POST]
     connects = [r["body"] for r in hive.requests if r["path"].endswith("/act") and r["body"].get("action") == "connect"]
     assert [body["params"] for body in connects] == [{}]
@@ -778,14 +777,50 @@ def test_a_no_at_the_terminal_sends_nothing(start, hive, teams):
     assert Page(hive).view(hive.swarms[0]["id"])["items"] == []
 
 
-def test_without_a_browser_the_address_is_printed_with_a_warning(start, hive, teams):
+def test_without_a_browser_the_address_is_printed_with_a_warning(start, hive, platform, teams):
     run = start("--server-url", teams.url, browser=False)
     run.send(TENANT, CLIENT_ID, "y", "y")
-    run.expect("Paste the address the browser landed on")
-    assert "pause a recording first" in run.output and run.browser_address() in run.output
-    run.send("")  # Enter: stop
-    assert run.finish() == 1
+    run.expect("the demo goes on by itself.")
+    address = run.browser_address()
+    assert "pause a recording first" in run.output and address in run.output
+    assert demo_tests.browse(demo_tests.authorize(platform, address))[0] == 200  # opened by hand, it signs in
+    run.expect("✓ In the view: Sign-in: oauth-device (signed in by user:ada")
+    assert run.finish() == 1  # the input ends at the next question
     assert run.output.rstrip().endswith("Signed out of the hive: this run's session is ended.")
+    assert hive.sessions == set()
+
+
+def test_a_sign_in_declined_in_the_browser_stops_the_demo(start, hive, platform, teams):
+    run = start("--server-url", teams.url)
+    run.send(TENANT, CLIENT_ID, "y", "y")
+    run.expect("the demo goes on by itself.")
+    query = {k: v[0] for k, v in parse_qs(urlsplit(run.browser_address()).query).items()}
+    status, page = demo_tests.browse(f"{query['redirect_uri']}/?error=access_denied&state={query['state']}")
+    assert status == 400 and "did not complete" in page
+    assert run.finish() == 1
+    assert "✗ The sign-in failed" in run.output and "If something fails" in run.output
+    assert "list-tools" not in run.output.split("[3] connect")[1]
+    assert platform.requests == [] and teams.graph() == [] and hive.sessions == set()
+
+
+def test_an_earlier_app_that_answers_connect_its_own_way_is_told_apart(start, hive, teams, monkeypatch):
+    """A hive started before the checkout changed still runs the app it loaded. 0.2 answered connect with flow
+    browser by asking for the landing address to be pasted back: the script says what to do, and shows nothing
+    of that answer, whose message carries a sign-in link."""
+    act = hive.fake.program.act
+
+    async def as_0_2(ctx, action, items, params):
+        if action != "connect":
+            return await act(ctx, action, items, params)
+        return {"status": "needs_input", "needs": {"address": "the address your browser lands on"},
+                "message": "Open https://login.example/authorize?state=st-4f1e9a7c and sign in."}
+
+    monkeypatch.setattr(hive.fake.program, "act", as_0_2)
+    run = start("--server-url", teams.url)
+    run.send(TENANT, CLIENT_ID, "y", "y")
+    assert run.finish() == 1
+    assert "✗ connect did not start a browser sign-in that finishes by itself" in run.output
+    assert "restart" in run.output and "st-4f1e9a7c" not in run.output and run.browser_address() is None
     assert hive.sessions == set()
 
 
@@ -888,48 +923,6 @@ def test_a_token_in_what_the_app_returned_stops_the_demo(hive_demo, capsys):
             demo.check_tokens()
         demo.outputs.pop()
     assert "session-token" not in capsys.readouterr().out
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="needs a pseudo-terminal")
-def test_a_long_pasted_address_arrives_whole_and_is_not_shown():
-    """The reader the two demos share (terminal_input.py): at a terminal the address is read key by key
-    without echo, whatever its length and without the marks a terminal puts around a paste. In line
-    mode a terminal takes no line past its limit (1,024 bytes on macOS)."""
-    code = (f"import importlib.util; spec = importlib.util.spec_from_file_location('d', {str(HIVE_DEMO)!r}); "
-            "d = importlib.util.module_from_spec(spec); spec.loader.exec_module(d); "
-            "value = d.ask_hidden('Paste: '); print('GOT', len(value), value[-12:])")
-    master, slave = pty.openpty()
-    proc = subprocess.Popen([sys.executable, "-c", code], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
-    os.close(slave)
-    seen = b""
-
-    def read_until(text: bytes, seconds: float = 20) -> None:
-        nonlocal seen
-        deadline = time.monotonic() + seconds
-        while text not in seen:
-            assert time.monotonic() < deadline, seen
-            if select.select([master], [], [], 0.1)[0]:
-                try:
-                    seen += os.read(master, 65536)
-                except OSError:  # the child closed the terminal
-                    break
-
-    try:
-        read_until(b"Paste: ")
-        address = "https://login.example" + LANDING + "?code=" + "c0de" * 740 + "&state=the-end-0123"
-        pasted = ("\x1b[200~" + address + "\x1b[201~\n").encode()  # as a terminal marks a paste
-        for start in range(0, len(pasted), 256):
-            os.write(master, pasted[start:start + 256])
-            time.sleep(0.01)
-        read_until(b"GOT")
-        read_until(b"\n")
-        assert proc.wait(timeout=20) == 0
-    finally:
-        proc.kill()
-        os.close(master)
-    shown = seen.decode()
-    assert f"GOT {len(address)} the-end-0123" in shown and len(address) > 3000
-    assert "c0de" not in shown and "login.example" not in shown
 
 
 if __name__ == "__main__":  # the stand-in server for a rehearsal (see the top of this file)

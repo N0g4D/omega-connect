@@ -14,7 +14,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import pty
 import re
 import signal
 import subprocess
@@ -22,6 +21,8 @@ import sys
 import threading
 import time
 import unicodedata
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,7 +48,7 @@ ACCOUNT = "ada@omegademo.example"
 ID_TOKEN = "eyJhbGciOiJSUzI1NiJ9." + base64.urlsafe_b64encode(
     json.dumps({"preferred_username": ACCOUNT}).encode()).decode().rstrip("=") + ".c2ln"
 DEVICE_CODE = "dev-code-5c1e9a"
-AUTH_CODE = "ac-0f3e9d2c1b4a5968"  # what the browser sign-in's landing address carries
+AUTH_CODE = "ac-0f3e9d2c1b4a5968"  # what the browser brings back to the app after a browser sign-in
 SHELL_KEY = "the-operators-own-key"  # set in the shell that runs the demo; not a Fernet key, so using it fails
 OTHER_TEAM = "0e0e0e0e-1111-4222-8333-444444444444"
 PRIVATE, QUIET = "19:5e1f0a7b@thread.tacv2", "19:0c2d3e4f@thread.tacv2"
@@ -126,10 +127,25 @@ TOKENS = {"access_token": TOKEN, "refresh_token": REFRESH, "expires_in": 3600, "
 
 def authorize(platform, address: str) -> str:
     """The person signs in at the browser sign-in's address and consents: the identity platform issues a
-    code for its PKCE challenge, and the browser lands on the redirect address with that code."""
+    code for its PKCE challenge and sends the browser back to the redirect address with that code.
+    Returns where the browser goes; as Entra does for a redirect address without a path, a slash comes
+    before the query."""
     query = {k: v[0] for k, v in parse_qs(urlsplit(address).query).items()}
     platform.codes[AUTH_CODE] = (query["code_challenge"], query["redirect_uri"])
-    return f"{query['redirect_uri']}?code={AUTH_CODE}&state={query['state']}&session_state=s-1"
+    return f"{query['redirect_uri']}/?code={AUTH_CODE}&state={query['state']}&session_state=s-1"
+
+
+def browse(url: str) -> tuple[int | None, str]:
+    """The person's browser goes to an address on this machine: (status, page), or (None, "") when
+    nothing answers there."""
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=30) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return exc.code, exc.read().decode()
+    except OSError:
+        return None, ""
 
 
 # Runs demo.py with this file in place of server.py, and in place of the person's browser a stand-in
@@ -152,33 +168,18 @@ sys.exit(demo.main())
 
 
 class Run:
-    """A script in its own process, answered line by line as a person at the terminal would: through
-    pipes, or, with `terminal`, on a pseudo-terminal, which echoes what is typed as a real one does."""
+    """A script in its own process, answered line by line as a person at the terminal would."""
 
-    def __init__(self, argv: list[str], env: dict, cwd: Path, terminal: bool = False):
-        self._terminal = None
-        if terminal:
-            self._terminal, script_side = pty.openpty()
-            self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=script_side, stdout=script_side,
-                                         stderr=script_side)
-            os.close(script_side)
-        else:
-            self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.STDOUT)
+    def __init__(self, argv: list[str], env: dict, cwd: Path):
+        self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT)
         self._out = b""
         self._seen = 0
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
 
     def _read(self) -> None:
-        source = self.proc.stdout.fileno() if self._terminal is None else self._terminal
-        while True:
-            try:
-                chunk = os.read(source, 65536)
-            except OSError:  # a terminal whose script has ended
-                return
-            if not chunk:
-                return
+        for chunk in iter(lambda: os.read(self.proc.stdout.fileno(), 65536), b""):
             self._out += chunk
 
     @property
@@ -198,23 +199,14 @@ class Run:
             time.sleep(0.05)
 
     def send(self, *lines: str) -> None:
-        typed = "".join(line + "\n" for line in lines).encode()
-        if self._terminal is None:
-            self.proc.stdin.write(typed)
-            self.proc.stdin.flush()
-            return
-        for start in range(0, len(typed), 256):  # as a terminal hands over a paste, a piece at a time
-            os.write(self._terminal, typed[start:start + 256])
-            time.sleep(0.01)
+        self.proc.stdin.write("".join(line + "\n" for line in lines).encode())
+        self.proc.stdin.flush()
 
     def finish(self, timeout: float = 60) -> int:
-        """Closes the input (at a terminal, Ctrl-D), waits for the script to end and returns its exit code."""
+        """Closes the input, waits for the script to end and returns its exit code."""
         try:
-            if self._terminal is None:
-                self.proc.stdin.close()
-            else:
-                os.write(self._terminal, b"\x04")
-        except OSError:  # the script has ended already
+            self.proc.stdin.close()
+        except BrokenPipeError:
             pass
         code = self.proc.wait(timeout=timeout)
         self._reader.join(timeout=10)
@@ -230,21 +222,17 @@ class Run:
                 self.proc.kill()
                 self.proc.wait()
         self._reader.join(timeout=10)
-        try:
-            if self._terminal is None:
-                self.proc.stdin.close()
-                self.proc.stdout.close()
-            else:
-                os.close(self._terminal)
-                self._terminal = -1  # closed: a second stop finds nothing to close
-        except OSError:
-            pass
+        for stream in (self.proc.stdin, self.proc.stdout):
+            try:
+                stream.close()
+            except OSError:
+                pass
 
 
 class DemoRun(Run):
     """demo.py in its own process, with this file in place of server.py and a stand-in for the browser."""
 
-    def __init__(self, platform, tmp_path: Path, browser: bool = True, terminal: bool = False):
+    def __init__(self, platform, tmp_path: Path, browser: bool = True):
         self.graph_log = tmp_path / "graph.log"
         self.browser_log = tmp_path / "browser.log"
         self.temp = tmp_path / "tmp"  # the demo's temporary folder goes here
@@ -256,7 +244,7 @@ class DemoRun(Run):
                    FAKE_BROWSER_LOG=str(self.browser_log), FAKE_BROWSER="yes" if browser else "none",
                    # what an operator's shell may hold; the demo must use neither
                    OMEGA_CONNECT_DATA_DIR=str(self.operator_store), OMEGA_CONNECT_SECRET_KEY=SHELL_KEY)
-        super().__init__([sys.executable, "-c", RUNNER, str(DEMO), __file__], env, tmp_path, terminal)
+        super().__init__([sys.executable, "-c", RUNNER, str(DEMO), __file__], env, tmp_path)
 
     def server(self) -> dict | None:
         """The server's process id and the OMEGA_CONNECT_ settings it got; None if it never started."""
@@ -293,8 +281,8 @@ def start(platform, tmp_path):
     """Starts demo.py and sends it the given lines; after the test, stops it if it still runs."""
     runs = []
 
-    def start(*lines: str, browser: bool = True, terminal: bool = False) -> DemoRun:
-        runs.append(DemoRun(platform, tmp_path, browser, terminal))
+    def start(*lines: str, browser: bool = True) -> DemoRun:
+        runs.append(DemoRun(platform, tmp_path, browser))
         if lines:
             runs[-1].send(*lines)
         return runs[-1]
@@ -358,30 +346,29 @@ def test_a_no_posts_nothing_and_message_text_cannot_drive_the_terminal(start):
     assert run.leftovers() == []
 
 
-def test_the_browser_sign_in_opens_the_address_and_takes_back_where_the_browser_lands(start, platform):
+def test_the_browser_sign_in_opens_the_page_and_the_demo_goes_on_once_the_browser_comes_back(start, platform):
     """For tenants that block the device code: the sign-in address goes to the browser, not to the screen,
-    since it carries the tenant and client IDs. A wrong or declined address is asked again; the right one
-    signs in, and the demo goes on to the post."""
+    since it carries the tenant and client IDs. After the sign-in the browser comes back to the app's
+    listener on this machine. The demo asks for nothing more: it waits for the view to name who signed in,
+    and goes on to the post."""
     run = start(TENANT, CLIENT_ID, "2")
-    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
+    run.expect("The sign-in page is open in your browser")
+    run.expect("the demo goes on by itself.")
     address = run.browser_address()
     query = {k: v[0] for k, v in parse_qs(urlsplit(address).query).items()}
     assert urlsplit(address).path == f"/{TENANT}/oauth2/v2.0/authorize" and query["client_id"] == CLIENT_ID
-    assert query["code_challenge_method"] == "S256" and query["redirect_uri"].endswith("/common/oauth2/nativeclient")
-    landed = authorize(platform, address)
-    run.send(landed.replace("/common/oauth2/nativeclient", "/elsewhere"))
-    run.expect("✗ paste the whole address the browser landed on")
-    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
-    run.send(landed.split("?")[0] + "?error=access_denied&error_description=The+user+declined.")
-    run.expect("✗ the sign-in ended with access_denied: The user declined.")
-    run.send(landed)
+    assert query["code_challenge_method"] == "S256"
+    assert re.fullmatch(r"http://localhost:[0-9]+", query["redirect_uri"])
+    assert browse(f"{query['redirect_uri']}/favicon.ico")[0] == 400  # what a browser may ask for besides
+    status, page = browse(authorize(platform, address))
+    assert status == 200 and "You can close this page" in page
     run.expect(f"Sign-in: oauth-device (signed in by user:ada, as {ACCOUNT}; minds use this sign-in)")
     run.expect("Which team? [1-2]: ")
     run.send("1", "", "y")  # the team, the default text, the approval
     assert run.finish() == 0
     out = run.output
-    assert "The sign-in page is open in your browser" in out and "Demo complete." in out
-    for hidden in (address, TENANT, CLIENT_ID, AUTH_CODE, TOKEN, REFRESH, ID_TOKEN, SHELL_KEY):
+    assert "Demo complete." in out and "Paste" not in out
+    for hidden in (address, TENANT, CLIENT_ID, AUTH_CODE, query["state"], TOKEN, REFRESH, ID_TOKEN, SHELL_KEY):
         assert hidden not in out
     redeemed = [form for path, form in platform.requests if form.get("grant_type") == "authorization_code"]
     assert len(redeemed) == 1 and redeemed[0]["redirect_uri"] == query["redirect_uri"]
@@ -390,38 +377,28 @@ def test_the_browser_sign_in_opens_the_address_and_takes_back_where_the_browser_
     assert run.leftovers() == []
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="needs a pseudo-terminal")
-def test_at_a_terminal_an_address_longer_than_a_line_signs_in_and_is_never_shown(start, platform):
-    """A terminal in line mode takes no line longer than its limit (1,024 bytes on macOS), and past it
-    not even Enter: read with input(), a longer address never arrived. The demo reads it key by key,
-    without echo, so the code in it does not reach the screen either."""
-    run = start(TENANT, CLIENT_ID, "2", terminal=True)
-    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
+def test_a_sign_in_declined_in_the_browser_stops_the_demo(start, platform):
+    run = start(TENANT, CLIENT_ID, "2")
+    run.expect("the demo goes on by itself.")
     query = {k: v[0] for k, v in parse_qs(urlsplit(run.browser_address()).query).items()}
-    code = "0.A" + "c0de_" * 400  # as long as the code of a work account can be
-    platform.codes[code] = (query["code_challenge"], query["redirect_uri"])
-    landed = f"{query['redirect_uri']}?code={code}&state={query['state']}&session_state=s-1"
-    assert len(landed.encode()) > 2 * 1024
-    run.send(landed)
-    run.expect(f"({len(landed):,} characters received)")
-    run.expect(f"Sign-in: oauth-device (signed in by user:ada, as {ACCOUNT}; minds use this sign-in)")
-    run.expect("Which team? [1-2]: ")
-    run.send("1", "", "y")
-    assert run.finish() == 0
-    out = run.output
-    assert "Demo complete." in out and "c0de_" not in out and query["state"] not in out
-    assert TENANT in out  # the terminal echoes what is typed at the other prompts, as a real one does
-    redeemed = [form for path, form in platform.requests if form.get("grant_type") == "authorization_code"]
-    assert [form["code"] for form in redeemed] == [code]
-    assert run.graph()[-1] == f"POST /teams/{TEAM}/channels/{CHANNEL}/messages" and run.leftovers() == []
-
-
-def test_without_a_browser_the_address_is_printed_with_a_warning(start):
-    run = start(TENANT, CLIENT_ID, "2", browser=False)
-    run.expect("Paste the address the browser landed on (it is not shown; Enter alone stops): ")
-    assert "pause a recording first" in run.output and run.browser_address() in run.output
-    run.send("")  # Enter: stop
+    status, page = browse(f"{query['redirect_uri']}/?error=access_denied&error_description=The+user+declined."
+                          f"&state={query['state']}")
+    assert status == 400 and "did not complete" in page and "declined" not in page
     assert run.finish() == 1
+    assert "✗ Sign-in failed: the sign-in ended with access_denied: The user declined." in run.output
+    assert "If something fails" in run.output
+    assert run.output.rstrip().endswith("Server stopped; temporary store, token and key deleted.")
+    assert platform.requests == [] and run.graph() == [] and run.leftovers() == []
+
+
+def test_without_a_browser_the_address_is_printed_with_a_warning(start, platform):
+    run = start(TENANT, CLIENT_ID, "2", browser=False)
+    run.expect("the demo goes on by itself.")
+    address = run.browser_address()
+    assert "pause a recording first" in run.output and address in run.output
+    assert browse(authorize(platform, address))[0] == 200  # opened by hand, it signs in all the same
+    run.expect("signed in by user:ada")
+    assert run.finish() == 1  # the input ends at the next question
     assert run.output.rstrip().endswith("Server stopped; temporary store, token and key deleted.")
     assert run.leftovers() == []
 

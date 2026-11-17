@@ -45,8 +45,10 @@ get its own Graph token (on-behalf-of flow).
    - single tenant; note the *Application (client) ID* and *Directory (tenant) ID*;
    - Authentication: *Allow public client flows* = Yes (needed for the device code),
      and, for the browser sign-in, *Add a platform*, *Mobile and desktop
-     applications*, with `https://login.microsoftonline.com/common/oauth2/nativeclient`
-     ticked as a redirect URI;
+     applications*, with `http://localhost` added as a redirect URI. It takes
+     no port: the app listens on a port the system picks, and Entra leaves the
+     port out when it compares a `localhost` redirect URI. Not under *Web*: a
+     redirect URI of that type makes Entra ask for a client secret;
    - API permissions, Microsoft Graph, delegated: `Team.ReadBasic.All`,
      `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`.
      `ChannelMessage.Read.All` needs admin consent: *Grant admin consent* on the
@@ -96,9 +98,18 @@ signed in to the swarm's servers, so do the demo in a swarm where nobody else
 has signed in to a server.
 
 On a tenant whose security defaults block the device code, run connect with
-`{"flow": "browser"}` instead. Open the address in the result, sign in and
-accept, then copy the address of the empty page the browser lands on and run
-connect again with `{"redirect_url": "<that address>"}`.
+`{"flow": "browser"}` instead. Open the address in the result in a browser on
+the hive's machine, sign in and accept. The browser then goes to
+`http://localhost:<port>`, where the app listens for it, and says "You are
+signed in. You can close this page."; the app finishes the sign-in by itself,
+and the view names who signed in, as above. The address stays good for ten
+minutes, and a new connect of yours on the server replaces it.
+
+The browser sign-in works when your browser is on the hive's machine. On a
+hive shared over a network, a person on another machine cannot use it yet:
+their browser would look for `localhost` on their own machine. That takes a
+callback address of the hive itself, which is still to do; until then they
+sign in with the device code, where the tenant allows it.
 
 **3. list-tools** (mind) with `{"server": "teams"}`. Every tool is `write` for
 now: the three Graph reads carry `"review": "not reviewed"`, because a
@@ -172,12 +183,11 @@ python examples/teams-mcp/demo.py
    device code (every tenant created since July 2026), it opens the sign-in page
    in your browser without printing its address, which carries the tenant and
    client IDs (where no browser opens, it prints the address and says so). Sign
-   in and accept, then paste the whole address of the empty page the browser
-   lands on; a wrong or declined one is asked again, and Enter alone stops the
-   demo. What you paste is not shown, since the address carries a one-time
-   code, and it is read key by key, so an address longer than a terminal line
-   (1,024 bytes on macOS) arrives whole. The app registration needs the
-   redirect URI of *Before the demo*.
+   in and accept: the browser goes back to the app, which listens for it on
+   this machine, and says "You are signed in. You can close this page." The
+   demo asks for nothing more and goes on by itself once the view names who
+   signed in; a sign-in that is declined, or not finished within ten minutes,
+   stops it. The app registration needs the redirect URI of *Before the demo*.
    Either way the demo then shows the account that the view names.
 3. **list-tools**, where every tool is `write`, then **accept-reads** on the
    definitions just listed: the three reads become `read`, and
@@ -223,7 +233,8 @@ The key goes from the command into the file without reaching the screen.
 `omegahive.sh` reads `hive.env` at each start (a shell reads it: a folder with
 spaces in its path needs quotes) and keeps your folder beside the Tools app's
 in `HIVE_PLUGIN_DIRS`. The app is not among the hive's pins, so it loads
-unpinned, from your checkout as it is. Its store is `~/.omega-connect`. To
+unpinned, from your checkout as it is when the hive starts: after a change in
+the checkout, stop and start the hive again. Its store is `~/.omega-connect`. To
 check: *Tool connections* is among the hive's apps, and the hive's own checker
 passes:
 
@@ -237,7 +248,7 @@ cd ~/OmegaHive/app && ~/OmegaHive/venv/bin/python -m hive.programs_check /path/t
 |---|---|---|
 | swarm, mind, rules | you | the script: `POST /api/swarms`, `POST /api/agents` (the only answer that carries the mind's token) and `POST /api/policy` with `{"scope": "agent:<mind id>", "skill": "program:omega-connect:<action>", "mode": ...}`, three times |
 | add-server | you | the script, after a yes: the app's page offers an action only on an item you selected and sends it without parameters, so it cannot add the first server |
-| connect | you | the script, after a yes, with `{"flow": "browser"}`. The page's own *Sign in to this server* sends no parameters, which is the device code |
+| connect | you | the script, after a yes, with `{"flow": "browser"}`; the sign-in itself in your browser, which then goes back to the app inside the hive. The page's own *Sign in to this server* sends no parameters, which is the device code |
 | list-tools, read-tool | the mind | the script: `POST /api/agent/programs/omega-connect/act` with `{"action", "params", "idempotency_key"}` and the mind's token. The hive takes the mind and its swarm from the token; a body that names them is refused |
 | accept-reads | you | the app's page: select the server `teams`, *Accept read-only tools*, confirm |
 | use-tool | the mind | the script, same route. The hive answers `{"status": "approval_required", "approval_id": ...}` |
@@ -273,8 +284,10 @@ python examples/teams-mcp/hive_demo.py             # in another; standard librar
    *Application (client) ID*, shows their first eight characters, and sends
    add-server after your yes. A later run finds the server and asks for neither.
 3. **connect**: after your yes it opens the sign-in page in your browser, without
-   printing its address. Sign in and accept, then paste the whole address of
-   the empty page the browser lands on. What you paste is not shown.
+   printing its address. Sign in and accept: the browser goes back to the app,
+   which listens for it on this machine inside the hive, and says "You are
+   signed in. You can close this page." The script waits for the app's view to
+   name who signed in, and goes on by itself.
 4. **list-tools** as the mind, then **accept-reads**: press Enter and accept
    the reads on the app's page; the script waits and goes on by itself.
 5. **read-tool** `list_teams`, `list_channels`, `read_channel_messages`: choose
@@ -291,7 +304,8 @@ python examples/teams-mcp/hive_demo.py             # in another; standard librar
 With `--device-code`, step 3 is connect without a flow: the script shows the
 address and the user code of the device code, which are for you, and goes on
 by itself once you have entered the code and signed in. The browser sign-in
-stays the default for now.
+is the default: it is the one that works on a tenant whose security defaults
+block the device code.
 
 At steps 4 and 6 the answer **2** makes the script send your accept-reads or
 your approval itself. The steps on the hive's pages are described from the
@@ -301,8 +315,9 @@ again answering 2; the new run finds the server and the sign-in in place.
 No token or sign-in link is printed or written, and no code but the device
 code you enter yourself: the one-time link, your
 session's token, the mind's token and the hive's confirm tokens stay in the
-script's memory, and the Microsoft tokens stay with the app, inside the hive:
-they never reach the script.
+script's memory. The code of the browser sign-in goes from your browser to
+the app, and the Microsoft tokens stay with the app, inside the hive: neither
+reaches the script.
 
 **Afterwards.** The mind stays in the hive, so you can show it there; its token
 ended with the run, the next run replaces it, and `hive_demo.py --cleanup`
@@ -339,20 +354,23 @@ only to the stand-in's memory.
 | demo.py: `The code expired before anyone signed in`, or `Sign-in failed` naming an expired code | the code lasts about 15 minutes: run the demo again |
 | demo.py: `Sign-in failed` | the sign-in was cancelled or the permissions declined; the identity platform's own text follows |
 | demo.py: the device code sign-in fails on a tenant created since July 2026 | its security defaults block the device code: run the demo again and choose **2**, the browser |
-| demo.py, browser: `AADSTS50011` in the browser | the redirect URI `https://login.microsoftonline.com/common/oauth2/nativeclient` is missing under *Mobile and desktop applications* |
+| browser sign-in: `AADSTS50011` in the browser | the redirect URI `http://localhost` is missing under *Mobile and desktop applications* (*Before the demo*, step 2); the port in the address does not matter |
+| browser sign-in: after the sign-in the browser cannot open `localhost:<port>` | the browser is not on the hive's machine, where the app listens (on a hive shared over a network this sign-in does not work yet: use the device code). Or the app no longer waits: ten minutes have passed, a newer connect of yours replaced the sign-in, or the hive was restarted. Run connect again |
+| browser sign-in: the page says *The sign-in did not complete* | the sign-in was cancelled or the permissions declined, or Microsoft refused the code. demo.py prints the reason; on a hive it is the `reason` of the last `connect` line in the app's trace (`trace.jsonl` in the swarm's folder under `~/.omega-connect`). `AADSTS7000218` there: `http://localhost` is registered under *Web*, not under *Mobile and desktop applications* |
+| demo.py: `Sign-in failed: nobody finished the sign-in in the browser` | the sign-in address lasts ten minutes: run the demo again |
 | demo.py: the *Identity* line is not `https://login.microsoftonline.com` | `OMEGA_CONNECT_OAUTH_AUTHORITY` is set in the shell (the tests use it): unset it |
-| browser sign-in: after the sign-in Microsoft moves the browser from `/common/oauth2/nativeclient` to `/common/wrongplace`, takes the code out of the address and warns not to copy the URL | on Microsoft Entra the browser sign-in with the `nativeclient` redirect does not work in an ordinary browser: the address with the code cannot be pasted. Use the device code: `hive_demo.py --device-code` (in demo.py, sign-in **1**) |
+| hive_demo.py: `connect did not start a browser sign-in that finishes by itself` | the hive still runs the app as it loaded it before the checkout changed (0.2 asked for an address to paste back): stop and start the hive |
 | hive_demo.py: `This hive has no app 'omega-connect'` | the app is not mounted, or the hive was not restarted after `hive.env` changed |
 | hive_demo.py: `The hive gave no sign-in link` | the hive is not running: `omegahive.sh start`, or open Omega Hive |
 | hive_demo.py: `teams-mcp does not answer` | start `server.py` first, on the port of `--server-url` |
 | hive_demo.py: `A server named 'teams' is already in this swarm, with another address or sign-in` | a rehearsal or a run on another port left it: remove it on the app's page, or give another `--swarm` |
 | hive_demo.py keeps waiting for accept-reads or for your answer | the page did not send it: Ctrl-C, run again and answer **2** |
-| demo.py, hive_demo.py: nothing appears as you paste the address | meant: the address carries a one-time code, so it is not shown. Press Enter after pasting |
+| hive_demo.py: `The sign-in failed` | declined, or not finished in time; the reason is in the app's trace, as above |
 
 ## Tests
 
 ```sh
-python -m pytest -q examples/teams-mcp      # 52 tests, ~45 s
+python -m pytest -q examples/teams-mcp      # 53 tests, ~60 s
 ```
 
 Graph is simulated in memory (`FakeGraph` replaces `server.graph_send`), so no
@@ -376,18 +394,18 @@ posted before the `y`, and exactly once after it; that `n` posts nothing; that
 message text cannot drive the terminal; that the device code, the tokens and
 the full tenant and client IDs never appear on screen; that the browser sign-in
 gives its address to the browser, not to the screen (printing it, with a
-warning, only where no browser opens), asks again after a wrong or declined
-address, and redeems the code once with its PKCE verifier; that at a terminal
-(a pseudo-terminal in the test) a pasted address of more than 2,048 bytes,
-which line mode would never deliver, signs in without being shown; that the
+warning, only where no browser opens), then asks for nothing: the test plays
+the browser, which comes back to the app's listener, and the demo goes on once
+the view names who signed in, the code redeemed once with its PKCE verifier
+and the same redirect address; that a sign-in declined in the browser stops
+the demo; that the
 demo uses its own store and key and passes none of the shell's
 `OMEGA_CONNECT_` settings to the server; that a failed sign-in, Ctrl-C or a
 closed input stop the demo, with the server stopped and the temporary folder
 deleted; and that no source file of the example holds an invisible control or
 bidirectional character.
 
-`terminal_input.py` is what the two demos ask at the terminal with: the
-prompts, and the reading of the pasted address.
+`terminal_input.py` is what the two demos ask at the terminal with.
 
 `test_hive_demo.py` runs `hive_demo.py` in its own process against the hive's
 HTTP routes, simulated over the repository's fake hive with the checks the Mac
@@ -401,11 +419,12 @@ that *No* posts nothing; that the mind's calls carry the mind's token, no
 `Origin` and a body that names neither the mind nor its swarm; that no sign-in
 link, session, mind token, confirm token, Microsoft token or sign-in code
 reaches the screen, and no token any address; that a second run asks for no ID
-and replaces the first run's mind; that `--cleanup` deletes the mind an
+and replaces the first run's mind; that the browser sign-in takes one connect
+and nothing pasted, and a declined one stops the demo; that a hive still
+running the earlier app, which answers connect another way, is told apart
+without showing its answer; that `--cleanup` deletes the mind an
 interrupted run left and denies its waiting request; that a missing hive, app
-or server is said before anything is made; that the confirm digest is the
-hive's (also against the build's shared vectors, when it is installed); and
-that the shared reader returns a pasted address longer than a terminal line
-whole, unshown and without the marks a terminal puts around a paste.
+or server is said before anything is made; and that the confirm digest is the
+hive's (also against the build's shared vectors, when it is installed).
 
 All three files pass with MCP SDK 1.x and 2.x.

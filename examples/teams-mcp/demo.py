@@ -35,7 +35,6 @@ import traceback
 import uuid
 import webbrowser
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 from cryptography.fernet import Fernet
 
@@ -45,7 +44,7 @@ SERVER = HERE / "server.py"
 sys.path[:0] = [str(HERE), str(ROOT / "tests")]
 
 from fakehive import FakeHive, HostRefusal, run  # noqa: E402
-from terminal_input import UNSAFE, Stop, ask, ask_hidden, ask_id  # noqa: E402
+from terminal_input import UNSAFE, Stop, ask, ask_id  # noqa: E402
 
 # A named person: connect and use-tool declare approver "person", which the local operator password
 # (user:operator) is not.
@@ -232,45 +231,32 @@ class Demo:
             self.device_code()
         else:
             self.browser()
-        server = next(item for item in self.view()["items"] if item["id"] == f"server:{SERVER_NAME}")
-        signin = next(line for line in server["text"].splitlines() if line.startswith("Sign-in"))
-        self.say(f"✓ In the view: {signin}", 2)
+        self.say(f"✓ In the view: {self.signin_line()}", 2)
         self.say("The token stays encrypted in the store; the view shows neither the token nor the code.", 2)
 
+    def signin_line(self) -> str:
+        server = next(item for item in self.view()["items"] if item["id"] == f"server:{SERVER_NAME}")
+        return next(line for line in server["text"].splitlines() if line.startswith("Sign-in"))
+
     def browser(self) -> None:
-        """Authorization code with PKCE: the person signs in in a browser and pastes back the address it lands
-        on, which is not shown as they paste it. The sign-in address carries the tenant and client IDs in
-        full, so it is opened, not printed, where a browser can be opened."""
+        """Authorization code with PKCE. After the sign-in the browser comes back to the app, which
+        listens for it on this machine and finishes the sign-in by itself; the demo waits for the view to
+        name who signed in. The sign-in address carries the tenant and client IDs in full, so it is
+        opened, not printed, where a browser can be opened."""
         self.call_line("connect", {"flow": "browser"}, [f"server:{SERVER_NAME}"])
-        started = self.person("connect", [f"server:{SERVER_NAME}"], {"flow": "browser"})
-        if started.get("status") != "needs_input":
-            self.need(started, "connect", HINT)  # says why, then stops
-        detail = started["detail"]
+        detail = self.need(self.person("connect", [f"server:{SERVER_NAME}"], {"flow": "browser"}), "connect",
+                           HINT)["detail"]
         if open_in_browser(detail["authorization_url"]):
             self.say("The sign-in page is open in your browser (its address carries the tenant and client IDs, "
                      "so it is not printed here).", 2)
         else:
-            self.say("No browser opens from here. Open this address in one; it carries the tenant and client "
-                     "IDs in full, so pause a recording first:", 2)
+            self.say("No browser opens from here. Open this address in a browser on this machine; it carries the "
+                     "tenant and client IDs in full, so pause a recording first:", 2)
             self.say(detail["authorization_url"], 4)
-        self.say("Sign in with an account of the tenant and accept the permissions. The browser then lands on an "
-                 f"empty page whose address starts with {detail['redirect_uri']}: copy that whole address.", 2)
-        while True:
-            landed = ask_hidden("  Paste the address the browser landed on (it is not shown; Enter alone stops): ")
-            if not landed:
-                raise Stop
-            # The code in it works once, with this run's PKCE verifier; still, it is never shown or kept.
-            self.secrets.update(code for code in parse_qs(urlsplit(landed).query).get("code", []) if len(code) >= 16)
-            self.say(f"({len(landed):,} characters received)", 2)
-            self.call_line("connect", {"redirect_url": "<the address you pasted>"}, [f"server:{SERVER_NAME}"])
-            finished = self.person("connect", [f"server:{SERVER_NAME}"], {"redirect_url": landed})
-            if finished.get("status") == "done":
-                return
-            self.say(f"✗ {finished.get('message', '')}", 2)
-            if finished.get("status") != "error":  # refused: no sign-in is waiting any more (expired)
-                self.say(HINT, 2)
-                raise Stop
-            self.say("The sign-in is still open: paste the address again, or sign in again from the same page.", 2)
+        self.say("Sign in with an account of the tenant and accept the permissions. The browser then says "
+                 "\"You are signed in\", and the demo goes on by itself.", 2)
+        self.wait_for_signin(detail["expires_in"], lambda: "signed in by" in self.signin_line(),
+                             "✗ Nobody signed in before the address of the sign-in expired.")
 
     def device_code(self) -> None:
         self.call_line("connect", {}, [f"server:{SERVER_NAME}"])
@@ -278,9 +264,15 @@ class Demo:
         self.say(f"Open    {detail['verification_uri']}", 2)
         self.say(f"Code    {detail['user_code']}", 2)
         self.say("Sign in with an account of the tenant and accept the permissions; the demo goes on by itself.", 2)
-        deadline = time.monotonic() + detail["expires_in"] + 5
+        self.wait_for_signin(detail["expires_in"], lambda: self.store.has_credentials(SERVER_NAME),
+                             "✗ The code expired before anyone signed in.")
+
+    def wait_for_signin(self, seconds: float, signed_in, late: str) -> None:
+        """The app finishes a sign-in by itself: waits until `signed_in()` says it has. A sign-in the app
+        traced as failed stops the demo, and so does `seconds` gone by, with `late`."""
+        deadline = time.monotonic() + seconds + 5
         reminder = time.monotonic() + 30
-        while not self.store.has_credentials(SERVER_NAME):
+        while not signed_in():
             failed = [entry for entry in self.store.traces(20)
                       if entry.get("action") == "connect" and entry.get("status") == "error"]
             if failed:
@@ -289,7 +281,7 @@ class Demo:
                 raise Stop
             now = time.monotonic()
             if now > deadline:
-                self.say("✗ The code expired before anyone signed in.", 2)
+                self.say(late, 2)
                 raise Stop
             if now > reminder:
                 self.say(f"… waiting for the sign-in ({int(deadline - now)} s left)", 2)
