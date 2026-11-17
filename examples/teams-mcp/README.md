@@ -288,12 +288,18 @@ python examples/teams-mcp/hive_demo.py             # in another; standard librar
    that nothing the app returned is shaped like an access token, and ends its
    session in the hive.
 
+With `--device-code`, step 3 is connect without a flow: the script shows the
+address and the user code of the device code, which are for you, and goes on
+by itself once you have entered the code and signed in. The browser sign-in
+stays the default for now.
+
 At steps 4 and 6 the answer **2** makes the script send your accept-reads or
 your approval itself. The steps on the hive's pages are described from the
 build's page source: if a page does not offer one, stop with Ctrl-C and run
 again answering 2; the new run finds the server and the sign-in in place.
 
-No token, code or sign-in link is printed or written: the one-time link, your
+No token or sign-in link is printed or written, and no code but the device
+code you enter yourself: the one-time link, your
 session's token, the mind's token and the hive's confirm tokens stay in the
 script's memory, and the Microsoft tokens stay with the app, inside the hive:
 they never reach the script.
@@ -335,6 +341,7 @@ only to the stand-in's memory.
 | demo.py: the device code sign-in fails on a tenant created since July 2026 | its security defaults block the device code: run the demo again and choose **2**, the browser |
 | demo.py, browser: `AADSTS50011` in the browser | the redirect URI `https://login.microsoftonline.com/common/oauth2/nativeclient` is missing under *Mobile and desktop applications* |
 | demo.py: the *Identity* line is not `https://login.microsoftonline.com` | `OMEGA_CONNECT_OAUTH_AUTHORITY` is set in the shell (the tests use it): unset it |
+| browser sign-in: after the sign-in Microsoft moves the browser from `/common/oauth2/nativeclient` to `/common/wrongplace`, takes the code out of the address and warns not to copy the URL | on Microsoft Entra the browser sign-in with the `nativeclient` redirect does not work in an ordinary browser: the address with the code cannot be pasted. Use the device code: `hive_demo.py --device-code` (in demo.py, sign-in **1**) |
 | hive_demo.py: `This hive has no app 'omega-connect'` | the app is not mounted, or the hive was not restarted after `hive.env` changed |
 | hive_demo.py: `The hive gave no sign-in link` | the hive is not running: `omegahive.sh start`, or open Omega Hive |
 | hive_demo.py: `teams-mcp does not answer` | start `server.py` first, on the port of `--server-url` |
@@ -345,7 +352,7 @@ only to the stand-in's memory.
 ## Tests
 
 ```sh
-python -m pytest -q examples/teams-mcp      # 50 tests, ~40 s
+python -m pytest -q examples/teams-mcp      # 52 tests, ~45 s
 ```
 
 Graph is simulated in memory (`FakeGraph` replaces `server.graph_send`), so no

@@ -167,7 +167,7 @@ can finish it.
 ```sh
 pip install -r requirements-dev.txt
 python -m pytest -q tests            # 83 tests, ~90 s, localhost only
-python -m pytest -q examples/teams-mcp   # 50 tests, ~40 s, Graph and the hive's routes simulated
+python -m pytest -q examples/teams-mcp   # 52 tests, ~45 s, Graph and the hive's routes simulated
 ```
 
 Contract checker, from the pre-release copy next to this repo (until omegahive

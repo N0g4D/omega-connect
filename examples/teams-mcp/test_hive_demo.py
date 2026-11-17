@@ -737,6 +737,38 @@ def test_an_answer_the_hive_took_but_did_not_acknowledge_still_counts(start, hiv
     assert stand_in.graph() == READS + [POST]
 
 
+def test_with_device_code_the_code_is_shown_and_the_demo_waits_for_the_sign_in(start, hive, platform, teams):
+    """--device-code: connect without a flow. The address and the user code are for the person, so they
+    are shown; the device code itself, the tokens and the IDs are not."""
+    platform.pending = 2  # the identity platform answers "authorization_pending" twice, then signs in
+    run = start("--device-code", "--server-url", teams.url)
+    run.send(TENANT, CLIENT_ID, "y", "y")
+    run.expect("Open    https://microsoft.com/devicelogin")
+    run.expect("Code    ABCD-1234")
+    run.expect("… waiting for the sign-in with the code")
+    run.expect(f"✓ In the view: Sign-in: oauth-device (signed in by user:ada, as {ACCOUNT}; minds use this sign-in)")
+    run.expect("Where [1]: ")
+    run.send("2", "1", "", "2", "y")
+    assert run.finish() == 0
+    out = run.output
+    assert "you, confirmed here: the device code" in out and "✓ Posted in Teams" in out and "Demo complete." in out
+    assert "Paste the address" not in out and run.browser_address() is None
+    assert teams.graph() == READS + [POST]
+    connects = [r["body"] for r in hive.requests if r["path"].endswith("/act") and r["body"].get("action") == "connect"]
+    assert [body["params"] for body in connects] == [{}]
+    assert [path for path, _ in platform.requests][0].endswith("/devicecode")
+    shown_nowhere(run, hive, TENANT, CLIENT_ID, demo_tests.DEVICE_CODE)
+
+
+def test_a_declined_device_code_stops_the_demo(start, hive, platform, teams):
+    platform.refuse = {"token": {"error": "authorization_declined", "error_description": "The end user declined."}}
+    run = start("--device-code", "--server-url", teams.url)
+    run.send(TENANT, CLIENT_ID, "y", "y")
+    assert run.finish() == 1
+    assert "Code    ABCD-1234" in run.output and "✗ The sign-in failed" in run.output
+    assert "list-tools" not in run.output.split("[3] connect")[1] and teams.graph() == [] and hive.sessions == set()
+
+
 def test_a_no_at_the_terminal_sends_nothing(start, hive, teams):
     run = start("--server-url", teams.url)
     run.send(TENANT, CLIENT_ID, "n")

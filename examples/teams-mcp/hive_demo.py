@@ -8,7 +8,7 @@ read-tool on list_teams, list_channels and read_channel_messages, then use-tool
 posting a message. The hive answers approval_required; once you have approved, the
 script sends the same request again with the approval_id.
 
-    python examples/teams-mcp/hive_demo.py
+    python examples/teams-mcp/hive_demo.py [--device-code]
 
 You are the hive's owner, a named person. What the hive's pages can do, you do
 there, and the script waits and goes on by itself: accept-reads on the app's page,
@@ -22,8 +22,10 @@ Your session comes from a one-time link (omegahive.sh signin-url) and is ended w
 the script stops. That link, your session's token, the mind's token, the hive's
 confirm tokens and the address your browser lands on after the Microsoft sign-in
 stay in this process's memory: they are never printed or written anywhere, and the
-address is not shown as you paste it. The tenant ID and the client ID are asked
-only when the server is not in the hive yet, and shown by their first characters.
+address is not shown as you paste it. With --device-code the sign-in is the device
+code: its address and user code, which are for you, are shown. The tenant ID and
+the client ID are asked only when the server is not in the hive yet, and shown by
+their first characters.
 Standard library only, with terminal_input.py beside it, so any Python 3.10+ runs it.
 """
 
@@ -202,8 +204,9 @@ def owner_signin(home: Path) -> tuple[str, str, dict]:
 
 class HiveDemo:
     def __init__(self, base: str, session: str, owner: dict, server_url: str, signin: bool = True,
-                 swarm_name: str = SWARM_NAME):
+                 swarm_name: str = SWARM_NAME, device_code: bool = False):
         self.base, self.session, self.server_url, self.signin = base, session, server_url, signin
+        self.device_code = device_code
         self.swarm_name = swarm_name
         self.me, self.my_name = owner["principal"], owner["name"]
         self.secrets = {session, owner["code"]}  # every secret value this run holds, to keep off the screen
@@ -476,7 +479,7 @@ class HiveDemo:
         """connect with the browser sign-in (authorization code with PKCE). The app's page can only
         send connect without parameters, which is the device code; a tenant whose security defaults
         block that code needs {"flow": "browser"}, so the script sends it."""
-        self.step("connect", "you, confirmed here: the browser sign-in")
+        self.step("connect", f"you, confirmed here: the {'device code' if self.device_code else 'browser sign-in'}")
         state = self.signin_line()
         if "signed in by" in state:
             self.say(f"✓ Already signed in. {state}", 2)
@@ -484,6 +487,9 @@ class HiveDemo:
         if not self.yes(f"Sign in to '{SERVER_NAME}' as {self.my_name}, with your Microsoft account?"):
             self.say("✗ Not confirmed: nothing was sent.", 2)
             raise Stop
+        if self.device_code:
+            self.connect_with_device_code()
+            return
         self.call_line("connect", {"flow": "browser"}, [f"server:{SERVER_NAME}"])
         started = self.person_act("connect", [f"server:{SERVER_NAME}"], {"flow": "browser"})
         if started.get("status") == "done":  # the answer of another sign-in, whose message is not for this screen
@@ -518,6 +524,33 @@ class HiveDemo:
                 raise Stop
             self.say("The sign-in is still open: paste the address again, or sign in again from the same page.", 2)
         self.say(f"✓ In the view: {self.signin_line()}", 2)
+        self.say("The token stays encrypted in the app's store; the view shows neither the token nor the code.", 2)
+
+    def connect_with_device_code(self) -> None:
+        """--device-code: connect without a flow. The app answers with an address and a user code, which
+        are for the person and so are shown, and finishes the sign-in by itself once they have entered
+        the code; the script waits for the view to name who signed in."""
+        self.call_line("connect", {}, [f"server:{SERVER_NAME}"])
+        started = self.need(self.person_act("connect", [f"server:{SERVER_NAME}"], {}), "connect", HINT)
+        detail = started.get("detail") or {}
+        if not detail.get("user_code"):
+            self.say("✗ connect gave no device code.", 2)
+            raise Stop
+        self.say(f"Open    {detail['verification_uri']}", 2)
+        self.say(f"Code    {detail['user_code']}", 2)
+        self.say("Enter the code there, sign in with an account of the tenant and accept the permissions; "
+                 "the demo goes on by itself.", 2)
+
+        def signed_in():
+            if any(call.get("status") == "error" for call in self.calls("connect")):
+                self.say("✗ The sign-in failed: it was declined, or the code expired. The app's trace keeps why.", 2)
+                self.say(HINT, 2)
+                raise Stop
+            line = self.signin_line()
+            return line if "signed in by" in line else None
+
+        line = self.wait_for("the sign-in with the code", int(detail.get("expires_in") or 900) + 5, signed_in)
+        self.say(f"✓ In the view: {line}", 2)
         self.say("The token stays encrypted in the app's store; the view shows neither the token nor the code.", 2)
 
     def signin_line(self) -> str:
@@ -760,6 +793,9 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"where teams-mcp listens on this machine (default: {DEFAULT_SERVER_URL})")
     parser.add_argument("--swarm", default=SWARM_NAME, metavar="NAME",
                         help=f"the swarm of the demo, made if you have none of that name (default: {SWARM_NAME!r})")
+    parser.add_argument("--device-code", action="store_true",
+                        help="sign in with a device code (an address and a code to enter there) in place of the "
+                             "browser sign-in, whose landing address Microsoft Entra does not let a browser keep")
     parser.add_argument("--no-signin", action="store_true",
                         help="for a stand-in server that needs no Microsoft sign-in (rehearsals and tests): "
                              "add-server without one, and no connect")
@@ -768,11 +804,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     print("omega-connect · the Teams demo on a real hive\n"
           "A mind reads a Teams channel and asks to post; you approve in the hive.\n"
-          "This script makes the mind's calls with the mind's token; no token, code or sign-in link is printed.\n")
+          "This script makes the mind's calls with the mind's token; no token or sign-in link is printed,\n"
+          "and no code but the device code you enter yourself (--device-code).\n")
     demo = base = session = None
     try:
         base, session, owner = owner_signin(Path(args.hive_home).expanduser())
-        demo = HiveDemo(base, session, owner, args.server_url, signin=not args.no_signin, swarm_name=args.swarm)
+        demo = HiveDemo(base, session, owner, args.server_url, signin=not args.no_signin, swarm_name=args.swarm,
+                        device_code=args.device_code)
         if args.cleanup:
             demo.cleanup()
             return 0
