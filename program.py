@@ -41,6 +41,10 @@ What the app guarantees on its side
   is unknown and does not send it again.
 - Every call is traced with server, tool, digests of arguments and result,
   status, actor, who approved it and the hive's record id for the act.
+- What a person does comes back with the view after it, so their page shows
+  it at once. An answer to a mind never carries a view: the view shows what
+  a mind is not told, the tools the owner hid, who signed in and the recent
+  calls.
 - Streamable HTTP by default. stdio servers (which start processes on the
   hive's machine) are refused unless OMEGA_CONNECT_ALLOW_STDIO=1.
 - Everything is scoped to the calling swarm.
@@ -734,6 +738,24 @@ def view(ctx, focus, stage):
 
 async def act(ctx, action, items, params):
     params = dict(params or {})
+    result = await _act(ctx, action, items, params)
+    # One rule for the view, whatever the action: a person called and the result is done, so it carries the view
+    # after the act, at the step the person was on (the host sends focus and stage with every act). A hive page keeps
+    # the view it has unless a done result brings one (PROGRAMS.md §3), and sends that view's revision with its next
+    # act: without one the page kept "No servers yet" after add-server and showed no tool after list-tools, whose
+    # first accept-reads then came back stale. Never to a mind: the view shows the tools the owner hid, who signed
+    # in and the recent calls. It is added here, last, to the answer alone, so no record of the act holds it.
+    if result.get("status") == "done" and "graph" not in result and _actor_kind(ctx) == "person":
+        try:
+            result = {**result, "graph": view(ctx, params.get("focus"), params.get("stage") or "unfold")}
+        except Exception as exc:
+            # The act stays done, without a view: a change that was made, or a call that went out, is no error
+            # because the view could not be made. The type only: an exception's text can carry anything.
+            logger.error("omega-connect: the view after %s failed with %s", action, type(exc).__name__)
+    return result
+
+
+async def _act(ctx, action, items, params):
     swarm = _swarm(ctx)
     store = store_mod.SwarmStore(swarm)
     try:
@@ -753,13 +775,7 @@ async def act(ctx, action, items, params):
             handler = {"add-server": _add_server, "remove-server": _remove_server, "accept-reads": _accept_reads,
                        "reclass-tool": _reclass_tool, "connect": _connect, "revoke": _revoke}[action]
             result = handler(ctx, swarm, store, items, params)
-            result = await result if asyncio.iscoroutine(result) else result
-            # A change made from the page shows at once: a done result's graph replaces the host's view (PROGRAMS.md
-            # §3), so it carries the view after the change, at the step the person was on (the host sends focus and
-            # stage with every act). Without it the page kept "No servers yet" after add-server.
-            if result.get("status") == "done" and "graph" not in result:
-                result["graph"] = view(ctx, params.get("focus"), params.get("stage") or "unfold")
-            return result
+            return await result if asyncio.iscoroutine(result) else result
         return _refused(f"unknown action '{action}'")
     except _NoSignin as exc:
         return _refused(exc.message, detail={"type": exc.kind})

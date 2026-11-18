@@ -276,6 +276,166 @@ def test_a_focus_that_is_no_item_leaves_the_change_done(hive, demo_url):
     assert set(hive.program.store_mod.SwarmStore("s1").servers()) == {"demo", "other"}
 
 
+def test_the_local_operators_changes_from_the_page_carry_the_view(hive, demo_url):
+    """The hive's person route gives every caller the kind person, the local operator password included (principal
+    user:operator, local_operator true; hive/core/program_actions.py at 832b36e, the same in build 0.38). So the
+    operator's changes from the page come back with the view, as #14 had them: add-server, then the other people's
+    actions that declare no approver "person". connect and use-tool do, and the hive refuses them to the operator
+    (test_only_a_named_person_signs_in, test_a_minds_write_needs_the_approval_of_the_person_whose_sign_in_it_uses)."""
+    page = {"focus": None, "stage": "unfold"}
+
+    def operator(action, items, params=None, confirmed=True):
+        return run(hive.person_act("s1", "operator", action, items, {**page, **(params or {})}, confirmed=confirmed))
+
+    def shown(answer):
+        assert answer["status"] == "done" and "graph" in answer, answer
+        return {item["id"] for item in answer["graph"]["items"]}
+
+    assert "server:demo" in shown(operator("add-server", [], {"name": "demo", "url": demo_url}))
+    assert "tool:demo/add" in shown(operator("list-tools", ["server:demo"], confirmed=False))   # a read: no confirm
+    assert "tool:demo/add" in shown(operator("accept-reads", ["server:demo"]))
+    assert "tool:demo/add" in shown(operator("reclass-tool", ["tool:demo/add"], {"class": "write"}))
+    revoked = operator("revoke", ["server:demo"])
+    assert "server:demo" in shown(revoked) and revoked["message"] == "you had no sign-in to delete"
+    assert "server:demo" not in shown(operator("remove-server", ["server:demo"]))
+
+
+def test_a_persons_list_tools_brings_the_tools_into_the_view(hive, demo_url):
+    """A hive page keeps the view it has after a done result that brings none, and sends that view's revision with
+    its next act. list-tools loads a server's tools, which moves the revision. So its result carries the view, as
+    every done act of a person does: the page shows the tools at once, and accept-reads from it passes the first
+    time. With the revision from before list-tools it is stale, as it was: that person had not seen the tools."""
+    add(hive, "s1", "demo", demo_url)
+    page = {"focus": "server:demo", "stage": "map"}
+    before = run(hive.view("s1", PERSON, **page))
+    assert not [item for item in before["items"] if item["kind"] == "tool"]
+    listed = run(hive.person_act("s1", PERSON, "list-tools", ["server:demo"], page, base_revision=before["revision"]))
+    assert listed["status"] == "done" and "graph" in listed
+    shown = listed["graph"]
+    assert {"tool:demo/add", "tool:demo/create_note"} <= {item["id"] for item in shown["items"]}
+    assert shown["focus"] == "server:demo" and shown["revision"] != before["revision"]
+    assert shown["revision"] == run(hive.view("s1", PERSON))["revision"]
+
+    def accept(revision):
+        return run(hive.person_act("s1", PERSON, "accept-reads", ["server:demo"], page, confirmed=True,
+                                   base_revision=revision))
+
+    assert accept(shown["revision"])["status"] == "done"
+    assert accept(before["revision"])["status"] == "stale"
+
+
+def test_every_done_act_of_a_person_carries_the_view(hive, demo_url):
+    """One rule for every action: a person called and the result is done, so it carries the view after the act, at
+    the focus and the stage their page sent. After read-tool and use-tool that view has the line of the call, and
+    its revision is the one the page's next act is checked against."""
+    add(hive, "s1", "demo", demo_url)
+    review(hive, "s1", "demo")
+
+    def person(action, **params):
+        return run(hive.person_act("s1", PERSON, action, ["server:demo"],
+                                   {"focus": "server:demo", "stage": "unfold", **params}))
+
+    def calls(graph):
+        return [item["label"] for item in graph["items"] if item["kind"] == "call"]
+
+    for action, params in (("list-servers", {}), ("list-tools", {}), ("inspect-tool", {"tool": "add"})):
+        done = person(action, **params)
+        assert done["status"] == "done" and "graph" in done, action
+        assert done["graph"]["focus"] == "server:demo" and calls(done["graph"]) == ["accept-reads demo"], action
+    read = person("read-tool", tool="add", arguments={"a": 2, "b": 40})
+    assert read["detail"]["result"]["text"] == "42" and "graph" in read
+    assert calls(read["graph"]) == ["accept-reads demo", "read-tool demo/add"]
+    line = next(item["text"] for item in read["graph"]["items"] if item["label"] == "read-tool demo/add")
+    assert "status: done" in line and f"actor: person:{PERSON}" in line
+    wrote = person("use-tool", tool="create_note", arguments={"title": "t", "text": "x"})
+    assert wrote["status"] == "done" and "graph" in wrote
+    assert calls(wrote["graph"]) == ["accept-reads demo", "read-tool demo/add", "use-tool demo/create_note"]
+    assert wrote["graph"]["revision"] == run(hive.view("s1", PERSON))["revision"]
+    stricter = run(hive.person_act("s1", PERSON, "reclass-tool", ["tool:demo/add"], {"class": "write"},
+                                   confirmed=True, base_revision=wrote["graph"]["revision"]))
+    assert stricter["status"] == "done"   # the page was not left behind by its own calls
+
+
+def test_a_mind_never_gets_the_view(hive, demo_url):
+    """The view is a person's page. It shows what a mind is not told: the tools the owner hid, who signed in, the
+    recent calls. So no answer to a mind carries one, whatever the action, however it ends and whatever the mind
+    sends: not the hive's record of an answer either."""
+    add(hive, "s1", "demo", demo_url)
+    review(hive, "s1", "demo")
+    hidden = reclass_on_page(hive, "s1", "demo/whoami", {"class": "hidden"})
+    assert "tool:demo/whoami" in {item["id"] for item in hidden["graph"]["items"]}   # the owner's page shows it
+    note = {"server": "demo", "tool": "create_note", "arguments": {"title": "t", "text": "x"}}
+    answers = [mind(hive, "s1", "list-servers", "k1"),
+               mind(hive, "s1", "list-tools", "k2", server="demo"),
+               mind(hive, "s1", "list-tools", "k3", server="demo", focus="server:demo", stage="unfold"),
+               mind(hive, "s1", "inspect-tool", "k4", server="demo", tool="add"),
+               mind(hive, "s1", "read-tool", "k5", server="demo", tool="add", arguments={"a": 1, "b": 1}),
+               mind(hive, "s1", "read-tool", "k6", **note),   # refused: the tool is write
+               write(hive, "s1", "k7", **note),
+               mind(hive, "s1", "use-tool", "k7", **note)]   # answered from the hive's record
+    assert [answer["status"] for answer in answers] == ["done"] * 5 + ["refused", "done", "done"]
+    for answer in answers:
+        assert "graph" not in answer and "whoami" not in json.dumps(answer)
+    assert "graph" not in mind(hive, "s1", "read-tool", "k8", server="demo", tool="whoami")   # refused: hidden
+    unnamed = run(hive.program.act(Ctx(swarm_id="s1"), "list-servers", [], {}))   # a caller the hive does not name
+    assert unnamed["status"] == "done" and "graph" not in unnamed   # only a person gets the view
+
+
+def test_the_view_enters_no_record(hive, demo_url, monkeypatch):
+    """The view is added last, to the answer alone. A person's use-tool under an idempotency key keeps its answer
+    for a retry: the record holds no view, the retry is answered from it without the tool running again, and gets
+    the view as it is by then. The trace has its line of the call, with nothing of a view."""
+    add(hive, "s1", "demo", demo_url)
+    sent = tool_calls(hive.program, monkeypatch)
+    store = hive.program.store_mod.SwarmStore("s1")
+    note = {"server": "demo", "tool": "create_note", "arguments": {"title": "once", "text": "1"},
+            "focus": "server:demo", "stage": "unfold"}
+
+    def use():
+        return run(hive.person_act("s1", PERSON, "use-tool", [], note, key="page-1"))
+
+    def without_the_view(answer):
+        return {key: value for key, value in answer.items() if key != "graph"}
+
+    first = use()
+    assert first["status"] == "done" and "graph" in first
+    kept = store.intent("page-1")["result"]
+    assert "graph" not in kept and kept == without_the_view(first)
+    run(hive.person_act("s1", PERSON, "use-tool", [], {"server": "demo", "tool": "list_notes"}))   # the view moves on
+    again = use()
+    assert sent == ["create_note", "list_notes"]   # the retry ran nothing
+    assert without_the_view(again) == kept and store.intent("page-1")["result"] == kept
+    assert again["graph"]["revision"] == run(hive.view("s1", PERSON))["revision"] != first["graph"]["revision"]
+    traced = store.traces(50)
+    assert [entry["tool"] for entry in traced] == ["create_note", "list_notes"]
+    assert not [value for entry in traced for value in entry.values() if isinstance(value, (dict, list))]
+
+
+def test_a_view_that_fails_leaves_the_act_done(hive, demo_url, monkeypatch, caplog):
+    """The view comes after the act. When it cannot be made, a change that was made and a call that went out are
+    still done, without a view, so the page keeps the one it has: they never turn into an error. The log names the
+    failure by its type, never by its words."""
+    add(hive, "s1", "demo", demo_url)
+    sent = tool_calls(hive.program, monkeypatch)
+    view = hive.program.view
+
+    def broken(ctx, focus, stage):
+        raise RuntimeError("the store answered tok-view-check")
+
+    monkeypatch.setattr(hive.program, "view", broken)
+    added = add(hive, "s1", "other", demo_url)
+    listed = run(hive.person_act("s1", PERSON, "list-tools", ["server:demo"], {}))
+    used = run(hive.person_act("s1", PERSON, "use-tool", [], {"server": "demo", "tool": "create_note",
+                                                              "arguments": {"title": "t", "text": "x"}}))
+    gone = run(hive.person_act("s1", PERSON, "remove-server", ["server:other"], {}, confirmed=True))
+    for answer in (added, listed, used, gone):
+        assert answer["status"] == "done" and "graph" not in answer, answer
+    assert sent == ["create_note"] and set(hive.program.store_mod.SwarmStore("s1").servers()) == {"demo"}
+    assert "RuntimeError" in caplog.text and "tok-view-check" not in caplog.text
+    monkeypatch.setattr(hive.program, "view", view)
+    assert "graph" in run(hive.person_act("s1", PERSON, "list-servers", ["server:demo"], {}))
+
+
 def test_the_browser_choice_of_connect_names_the_hives_machine(program):
     """What a hive page offers for connect's flow. The browser sign-in comes back to a listener of the app on the
     hive's machine (RFC 8252, 7.3), so its choice says where the browser has to be, as connect's result does."""
