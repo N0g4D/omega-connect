@@ -262,7 +262,11 @@ security defaults are on: the sign-in is refused with `AADSTS530035`. There,
 run `connect` with `{"flow": "browser"}` (authorization code with PKCE, the
 browser coming back to a loopback address: RFC 8252, section 7.3), which
 goes through with security defaults on (tried on a real tenant on 18 Nov
-2026). The app opens a listener on a free port of the loopback interface of
+2026). A browser that still holds a Microsoft session from before the
+security defaults were on gets the same `AADSTS530035` in this sign-in too:
+verified that day, when the same browser, not in a private window, went
+through once it had signed out of Microsoft. The app opens a listener on a
+free port of the loopback interface of
 the hive's machine and uses `http://localhost:<port>` as the redirect
 address. The result gives the address to open to the person who ran
 `connect`, and only to them: the view never shows it. They sign in, their

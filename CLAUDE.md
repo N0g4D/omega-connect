@@ -317,7 +317,10 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
    ran to its end, with the tenant's security defaults on, where the device
    code is refused (AADSTS530035; the browser sign-in gets the same error
    from a Microsoft session opened in the browser before the security
-   defaults were on: sign out and in again, or use a private window). Same
+   defaults were on: sign out and in again, or use a private window.
+   Verified that day at 13:58, on build 0.38: after the sign-out from
+   Microsoft (logout.srf) the same browser, not in a private window, went
+   through with the security defaults on). Same
    day on that branch: MesTTo's #14 merged (add-server on `applies_to: []`,
    declared inputs, the view in done results; for the page of omegahive
    #403, which the hive has had since it took build 0.38 at 10:37, after
