@@ -466,25 +466,28 @@ def test_closing_the_input_stops_the_demo(start):
     assert run.server() is None and run.leftovers() == []
 
 
-def python_sources() -> list[Path]:
-    """Every .py file of the repository: the app, its tests and this example. Hidden folders (.git, .venv) and
-    virtual environments are not the repository's."""
+def sources() -> list[Path]:
+    """Every .py file of the repository (the app, its tests, this example), and the documents and settings next
+    to them: .md, .json and .txt. Hidden folders (.git, .venv) and virtual environments are not the
+    repository's."""
     found = []
     for folder, subfolders, files in os.walk(ROOT):
         subfolders[:] = sorted(name for name in subfolders if not name.startswith(".") and name != "__pycache__"
                                and not Path(folder, name, "pyvenv.cfg").exists())
-        found += [Path(folder, name) for name in sorted(files) if name.endswith(".py")]
+        found += [Path(folder, name) for name in sorted(files) if name.endswith((".py", ".md", ".json", ".txt"))]
     return found
 
 
 def test_the_sources_hold_no_invisible_characters():
     """A control or bidirectional character belongs in a source file as an escape, where it can be seen: a
-    literal one can make the code read differently from what runs. Every .py file of the repository is looked
-    at. A tab and a carriage return are controls too: the sources hold neither."""
-    sources = python_sources()
+    literal one can make the code, or a document, read differently from what is there. Every .py file of the
+    repository is looked at, and its documents too. A tab and a carriage return are controls as well: the
+    sources hold neither."""
+    looked_at = sources()
     assert {ROOT / "program.py", ROOT / "connect" / "oauth.py", ROOT / "tests" / "test_app.py",
-            ROOT / "tests" / "fixtures" / "demo_server.py", HERE / "terminal_input.py"} <= set(sources)
-    for source in sources:
+            ROOT / "tests" / "fixtures" / "demo_server.py", HERE / "terminal_input.py", ROOT / "README.md",
+            ROOT / "CLAUDE.md", ROOT / "plugin.json"} <= set(looked_at)
+    for source in looked_at:
         hidden = {f"U+{ord(char):04X}" for char in source.read_text(encoding="utf-8")
                   if unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp") and char != "\n"}
         assert not hidden, f"{source.relative_to(ROOT)}: {sorted(hidden)}"
