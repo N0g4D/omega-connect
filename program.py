@@ -109,8 +109,10 @@ ADD_SERVER_INPUTS = {
 # The host refuses a view with more items than this (hive/core/programs.py, MAX_ITEMS).
 MAX_ITEMS_IN_VIEW = 400
 MAX_CALLS_IN_VIEW = 30
-# (swarm, server, principal) -> a sign-in that person started; never its code. A browser sign-in also
-# keeps its listener here, which a later connect of theirs, or the removal of the server, closes.
+# (swarm, server, principal) -> the sign-in that person has in progress; never its code. A browser
+# sign-in also keeps its listener here. A later connect of theirs, or the removal of the server, takes
+# the entry away: the listener closes, the wait for a device code ends, and tokens that still come for
+# that sign-in are not kept (_keep_signin).
 _PENDING_SIGNINS: dict[tuple[str, str, str], dict] = {}
 _SIGNIN_LOCK = threading.Lock()
 # one token renewal at a time per (swarm, server, principal)
@@ -1083,12 +1085,12 @@ def _add_server(ctx, swarm, store, items, params):
 
 def _remove_server(ctx, swarm, store, items, params):
     record, _ = _target(store, items, params, need_tool=False)
-    with _SIGNIN_LOCK:  # a browser sign-in in progress ends with its server: no token comes for it later
-        waiting = [key for key, pending in _PENDING_SIGNINS.items()
-                   if key[:2] == (swarm, record["name"]) and pending.get("listener")]
-        listeners = [_PENDING_SIGNINS.pop(key)["listener"] for key in waiting]
-    for listener in listeners:
-        listener.close()
+    with _SIGNIN_LOCK:  # a sign-in in progress ends with its server: no token comes for it later
+        waiting = [key for key in _PENDING_SIGNINS if key[:2] == (swarm, record["name"])]
+        closed = [_PENDING_SIGNINS.pop(key) for key in waiting]
+    for pending in closed:
+        if pending.get("listener"):  # a browser sign-in; the wait for a device code sees that it is over
+            pending["listener"].close()
     ENGINE.forget(swarm, record["name"])
     store.remove_server(record["name"])
     store.trace({"action": "remove-server", "server": record["name"], "tool": None,
@@ -1157,12 +1159,11 @@ async def _connect(ctx, swarm, store, items, params):
 
     def wait():
         try:
-            token = oauth_mod.poll_device_flow(auth["tenant"], auth["client_id"], code)
-            token["person"] = person
-            # Close the old session before the new token is visible, so a call made
-            # with the new token never lands on a session that is being closed.
-            ENGINE.forget(swarm, record["name"])
-            store.put_credentials(record["name"], person, token)
+            token = oauth_mod.poll_device_flow(auth["tenant"], auth["client_id"], code,
+                                               wanted=lambda: _signin_in_progress(key, pending))
+            if token is None:  # closed while it waited, by a later connect of theirs or with its server
+                return
+            _keep_signin(key, pending, store, token)
             store.trace({"action": "connect", "server": record["name"], "tool": None,
                          "actor": actor, "status": "done"})
         except Exception as exc:
@@ -1179,8 +1180,9 @@ async def _connect(ctx, swarm, store, items, params):
 
 
 def _signin_started(key: tuple[str, str, str], pending: dict) -> None:
-    """A person's sign-in to a server becomes the one in progress. An earlier one of theirs that waits
-    for a browser is closed: its address completes nothing from here on."""
+    """A person's sign-in to a server becomes the one in progress, and an earlier one of theirs is
+    over: the listener of a browser sign-in closes, so its address completes nothing from here on,
+    and the wait for a device code stops asking (_signin_in_progress)."""
     with _SIGNIN_LOCK:
         earlier = _PENDING_SIGNINS.get(key)
         _PENDING_SIGNINS[key] = pending
@@ -1193,6 +1195,23 @@ def _signin_in_progress(key: tuple[str, str, str], pending: dict) -> bool:
     its server is still there."""
     with _SIGNIN_LOCK:
         return _PENDING_SIGNINS.get(key) is pending
+
+
+def _keep_signin(key: tuple[str, str, str], pending: dict, store, token: dict) -> None:
+    """Keeps the tokens a sign-in ended with, under the person who started it, only while it is still
+    the one in progress. A later connect of theirs may have taken its place, or its server may be
+    gone, perhaps with another one added under its name: then nothing is kept (OAuthError "closed").
+    The check and the write are one step under the lock that connect and remove-server take to close
+    a sign-in, so neither comes in between."""
+    swarm, server, person = key
+    with _SIGNIN_LOCK:
+        if _PENDING_SIGNINS.get(key) is not pending:
+            raise oauth_mod.OAuthError("closed", "the sign-in was closed while it finished: a later connect took "
+                                                 "its place, or its server was removed")
+        # Close the old session before the new token is visible, so a call made with the new token
+        # never lands on a session that is being closed.
+        ENGINE.forget(swarm, server)
+        store.put_credentials(server, person, {**token, "person": person})
 
 
 def _signin_over(key: tuple[str, str, str], pending: dict) -> None:
@@ -1230,13 +1249,7 @@ def _browser_signin(swarm, store, record, person, actor):
                 raise failure
             # The identity provider is called here, in a thread of the listener: the hive's event loop keeps running.
             token = oauth_mod.finish_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"], signin, code)
-            token["person"] = person
-            if not _signin_in_progress(key, pending):
-                raise oauth_mod.OAuthError("closed", "the sign-in was closed while it finished: a later connect took "
-                                                     "its place, or its server was removed")
-            # As for the device code: close the old session before the new token is visible.
-            ENGINE.forget(swarm, record["name"])
-            store.put_credentials(record["name"], person, token)
+            _keep_signin(key, pending, store, token)
             trace()
             return True
         except Exception as exc:

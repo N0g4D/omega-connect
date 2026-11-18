@@ -135,6 +135,11 @@ def eventually(check, seconds=10):
     return True
 
 
+def code_waits(server="m365"):
+    """The app's threads that wait for a device code of `server` to be entered."""
+    return {thread for thread in threading.enumerate() if thread.name == f"omega-connect-signin-{server}"}
+
+
 def text_of(graph, item_id):
     return next(item["text"] for item in graph["items"] if item["id"] == item_id)
 
@@ -1441,6 +1446,67 @@ def test_a_sign_in_whose_server_is_removed_while_it_finishes_is_not_kept(hive, g
     assert store.signins("m365") == {} and store.servers() == {}
     closed = store.traces(1)[0]
     assert (closed["action"], closed["status"]) == ("connect", "error") and "its server was removed" in closed["reason"]
+
+
+def test_removing_a_server_closes_its_device_code_sign_ins(hive, guarded_url, fake_authority):
+    """A sign-in that waits for its code to be entered ends with its server, as a browser one does: the app stops
+    asking the identity platform about it, and no token comes later for a server that is gone, or for another
+    one added under its name."""
+    fake_authority.pending_polls = 10 ** 6  # the person has not entered the code
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    earlier = code_waits()
+    assert run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {}, confirmed=True))["status"] == "done"
+    [waiting] = code_waits() - earlier
+    assert "in progress" in signin_text(hive)
+    assert run(hive.person_act("s1", PERSON, "remove-server", ["server:m365"], {}, confirmed=True))["status"] == "done"
+    waiting.join(10)
+    assert not waiting.is_alive()  # the wait is over
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    fake_authority.pending_polls = 0  # now they enter it
+    assert signin_text(hive) == "Sign-in: oauth-device (not signed in)"
+    store = hive.program.store_mod.SwarmStore("s1")
+    assert store.signins("m365") == {} and [entry["action"] for entry in store.traces(10)] == ["remove-server"]
+
+
+def test_a_device_code_sign_in_whose_server_is_removed_while_it_finishes_is_not_kept(hive, guarded_url,
+                                                                                     fake_authority, monkeypatch):
+    """The person has entered the code and the tokens are on their way when the server is removed and another
+    is added under its name: the thread that waited drops them, and the trace says why."""
+    oauth = hive.program.oauth_mod
+    poll = oauth.poll_device_flow
+
+    def removed_meanwhile(*args, **kwargs):
+        token = poll(*args, **kwargs)
+        removed = run(hive.person_act("s1", PERSON, "remove-server", ["server:m365"], {}, confirmed=True))
+        assert removed["status"] == "done" and add(hive, "s1", "m365", guarded_url, signin=SIGNIN)["status"] == "done"
+        return token
+
+    monkeypatch.setattr(oauth, "poll_device_flow", removed_meanwhile)
+    fake_authority.pending_polls = 0
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    assert run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {}, confirmed=True))["status"] == "done"
+    store = hive.program.store_mod.SwarmStore("s1")
+    assert eventually(lambda: [entry for entry in store.traces(10) if entry["action"] == "connect"])
+    [closed] = [entry for entry in store.traces(10) if entry["action"] == "connect"]
+    assert closed["status"] == "error" and "its server was removed" in closed["reason"]
+    assert store.signins("m365") == {} and signin_text(hive) == "Sign-in: oauth-device (not signed in)"
+
+
+def test_a_new_connect_closes_the_persons_earlier_device_code_sign_in(hive, guarded_url, fake_authority):
+    """One sign-in in progress per person and server, with the device code too: a person's new connect ends the
+    wait of their earlier one, so one sign-in is kept and traced, the later one's."""
+    fake_authority.pending_polls = 10 ** 6
+    add(hive, "s1", "m365", guarded_url, signin=SIGNIN)
+    earlier = code_waits()
+    run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {}, confirmed=True))
+    [first] = code_waits() - earlier
+    assert run(hive.person_act("s1", PERSON, "connect", ["server:m365"], {}, confirmed=True))["status"] == "done"
+    first.join(10)
+    assert not first.is_alive() and "in progress" in signin_text(hive)
+    fake_authority.pending_polls = 0  # the person enters the code
+    store = hive.program.store_mod.SwarmStore("s1")
+    assert eventually(lambda: store.has_credentials("m365", f"user:{PERSON}"))
+    assert [(entry["action"], entry["status"]) for entry in store.traces(10)] == [("connect", "done")]
 
 
 def test_the_listener_gives_up_after_too_many_requests(hive, guarded_url, fake_authority, monkeypatch):

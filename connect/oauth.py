@@ -98,10 +98,14 @@ def start_device_flow(tenant: str, client_id: str, scopes: list[str]) -> DeviceC
     )
 
 
-def poll_device_flow(tenant: str, client_id: str, code: DeviceCode, sleep=time.sleep) -> dict:
-    """Blocks until the person signs in, declines, or the code expires."""
+def poll_device_flow(tenant: str, client_id: str, code: DeviceCode, sleep=time.sleep,
+                     wanted: Callable[[], bool] = lambda: True) -> dict | None:
+    """Blocks until the person signs in, declines, or the code expires. `wanted` is asked before each
+    request: once it says no, nothing more is sent and the answer is None."""
     interval = max(code.interval, 1)
     while time.time() < code.expires_at:
+        if not wanted():
+            return None
         data = _post(f"{authority()}/{tenant}/oauth2/v2.0/token", {
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             "client_id": client_id,
