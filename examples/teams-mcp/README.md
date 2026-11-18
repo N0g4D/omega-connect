@@ -217,7 +217,9 @@ installs in `~/OmegaHive`, where you enter as its owner, a named person. The
 app was mounted and checked there on build 0.33, and what follows about the
 hive's routes and pages was read in that build. The demo recorded on 17 Nov
 2026 ran on build 0.34; on 18 Nov 2026 it ran on build 0.37 with the browser
-sign-in, Microsoft's security defaults on. Both runs were on a real tenant.
+sign-in, Microsoft's security defaults on, and again on build 0.38, with the
+server added and the sign-in made on the app's page. All three runs were on
+a real tenant.
 As read on 0.33, a mind cannot call an app's actions by itself yet, so the
 script makes the mind's calls in its place, with the mind's own token. The
 person's steps are yours: on the hive's pages where a page can do them,
@@ -252,25 +254,36 @@ cd ~/OmegaHive/app && ~/OmegaHive/venv/bin/python -m hive.programs_check /path/t
 | Step | Who | Where |
 |---|---|---|
 | swarm, mind, rules | you | the script: `POST /api/swarms`, `POST /api/agents` (the only answer that carries the mind's token) and `POST /api/policy` with `{"scope": "agent:<mind id>", "skill": "program:omega-connect:<action>", "mode": ...}`, three times |
-| add-server | you | the script, after a yes: the app's page offers an action only on an item you selected and sends it without parameters, so it cannot add the first server |
-| connect | you | the script, after a yes, with `{"flow": "browser"}`; the sign-in itself in your browser, which then goes back to the app inside the hive. The page's own *Sign in to this server* sends no parameters, which is the device code |
+| add-server | you | the script, after a yes. Or, from build 0.38, the app's page before the run: *Add a server*, with nothing selected. Up to 0.37 the page offers an action only on an item you selected and sends it without inputs, so it cannot add the first server |
+| connect | you | the script, after a yes, with `{"flow": "browser"}`; the sign-in itself in your browser, which then goes back to the app inside the hive. Or, from build 0.38, the app's page before the run: *Sign in to this server* on the server, with the browser choice. Up to 0.37 the page's *Sign in to this server* sends no inputs, which is the device code |
 | list-tools, read-tool | the mind | the script: `POST /api/agent/programs/omega-connect/act` with `{"action", "params", "idempotency_key"}` and the mind's token. The hive takes the mind and its swarm from the token; a body that names them is refused |
 | accept-reads | you | the app's page: select the server `teams`, *Accept read-only tools*, confirm |
 | use-tool | the mind | the script, same route. The hive answers `{"status": "approval_required", "approval_id": ...}` |
 | approval | you | the hive's Approvals page: *Approve*, or *No* |
 | use-tool, again | the mind | the script: the same body with the `approval_id` |
 
-That table is the page of the builds the demo ran on: up to 0.37 it offers
-an action only on a selected item and sends it without inputs, hence the
-script for add-server and connect. From build 0.38 the page asks for the
-inputs an action declares, and lists the actions on the app itself under *In
-this app* when nothing is selected (omegahive #403). There add-server and
-connect can be done on the page, since both declare their inputs (the main
-README, "Actions"): *Add a server* with nothing selected, then *Sign in to
-this server* on the server, where the *browser* choice is this same sign-in,
-in a browser on the hive's machine. That is still to try on this hive. The
-script sends these two steps itself, whichever page the hive has; on 0.38 it
-has not been run yet (the routes it uses are all there).
+Up to build 0.37 the page offers an action only on a selected item and sends
+it without inputs, hence the script for add-server and connect. From build
+0.38 the page asks for the inputs an action declares, and lists the actions
+on the app itself under *In this app* when nothing is selected (omegahive
+#403). There add-server and connect can be done on the page, since both
+declare their inputs (the main README, "Actions"): *Add a server* with
+nothing selected, then *Sign in to this server* on the server, where the
+*browser* choice is this same sign-in, in a browser on the hive's machine.
+*Add a server* takes what step 1 of *Demo steps* sends: the name `teams`,
+the server's address, *Microsoft sign-in, by each person*, the two IDs, and
+the four scopes on one line, separated by spaces. The script knows the
+server by that name, the address of `--server-url` and its kind of sign-in.
+
+Both were done that way on this hive on 18 Nov 2026, on build 0.38 and a
+real tenant: the server removed on the page, added again with *Add a
+server*, and signed in to with *Sign in to this server* and the browser
+choice. The script, run after that, found the server and the sign-in in
+place ("Already there", "Already signed in") and ran to its end:
+accept-reads on the page, the three reads, use-tool approved, the message
+in Teams, and the trace naming who approved. Where it finds no server or no
+sign-in, the script still sends these two steps itself, after a yes,
+whichever page the hive has.
 
 A person's act that declares `confirm` needs the host's confirm first:
 `POST /api/programs/omega-connect/confirm` with `{"swarm_id", "action",
@@ -299,12 +312,14 @@ python examples/teams-mcp/hive_demo.py             # in another; standard librar
    address of the app's page for that swarm.
 2. **add-server**: it asks for the *Directory (tenant) ID* and the
    *Application (client) ID*, shows their first eight characters, and sends
-   add-server after your yes. A later run finds the server and asks for neither.
+   add-server after your yes. A later run finds the server and asks for
+   neither, and so does a run after you added it on the app's page.
 3. **connect**: after your yes it opens the sign-in page in your browser, without
    printing its address. Sign in and accept: the browser goes back to the app,
    which listens for it on this machine inside the hive, and says "You are
    signed in. You can close this page." The script waits for the app's view to
-   name who signed in, and goes on by itself.
+   name who signed in, and goes on by itself. Where you are signed in already,
+   from an earlier run or from the app's page, it says so and asks nothing.
 4. **list-tools** as the mind, then **accept-reads**: press Enter and accept
    the reads on the app's page; the script waits and goes on by itself.
 5. **read-tool** `list_teams`, `list_channels`, `read_channel_messages`: choose

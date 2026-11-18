@@ -17,8 +17,8 @@ HTTP and stdio, and the offline tests pass. 0.2.0 was the first working
 version with the changes from the first review
 ([Changes in 0.2.0](#changes-in-020)); 0.3.0 changes the browser sign-in,
 which the app now finishes by itself on a loopback listener, and declares
-the inputs of `add-server` and `connect` so that a hive page can ask for
-them ([Changes in 0.3.0](#changes-in-030)).
+the inputs of `add-server`, `connect` and `reclass-tool` so that a hive page
+can ask for them ([Changes in 0.3.0](#changes-in-030)).
 `hive.programs_check` from a pre-release copy of omegahive (04fc3f2) reports it
 compatible. The contract fixture is not in that copy; the omegahive repository
 opens around 19–20 November. How the hive runs a mind's action is checked
@@ -43,26 +43,38 @@ Parameters for the tool actions: `server`, `tool`, `arguments` (a JSON object,
 or a string holding one). They are also `binding_params`, so an approval binds
 to the exact server, tool and arguments.
 
-**What a hive page can ask for** (MesTTo's #14). `add-server` and `connect`
-declare their inputs in `describe()` as form fields, in the shapes of MCP's
-elicitation forms: a type, a title, and for a choice its values, each with a
-title, and a default. A hive whose app page asks for the inputs an action
-declares before it sends it, and lists the actions on the app itself when
-nothing is selected, can then add the first server and choose how to sign
-in: omegahive #403, which the Mac test build has from 0.38 (PROGRAMS.md,
-section 2, there; #14 calls the change #416). The page leaves a blank field
-out and marks none as required: the app checks what it gets.
+**What a hive page can ask for** (MesTTo's #14). `add-server`, `connect` and
+`reclass-tool` declare their inputs in `describe()` as form fields, in the
+shapes of MCP's elicitation forms: a type, a title, and for a choice its
+values, each with a title, and a default where one makes sense. A hive whose
+app page asks for the inputs an action declares before it sends it, and
+lists the actions on the app itself when nothing is selected, can then add
+the first server, choose how to sign in and say which class a tool gets.
+That page is omegahive's issue #403, closed by its pull request #416, and
+the Mac test build has it from 0.38 (PROGRAMS.md, section 2, there). The
+page leaves a blank field out and marks none as required: the app checks
+what it gets.
 
-`add-server` declares `name`, `url`, `description` and the sign-in;
-`connect` declares `flow`: `device`, the default, or `browser`, which its
-title calls a browser on the hive's machine. A page sends flat values, so
-`add-server` also takes the sign-in as `signin_kind` (`none`, `oauth-device`
-or `bearer-env`) with that kind's own fields: `tenant`, `client_id` and
-`scopes` on one line, separated by spaces, or `variable`. A `signin` object
-sent directly still wins ("Add a server", below). The `done` result of a
-people's action carries the view after the change (`graph`), at the focus
-the page sent, so the page shows the change at once. A `refused` result
-carries no view, and a `stale` one the current view, as before.
+| Action | Inputs a page asks for | Default |
+|---|---|---|
+| `add-server` | `name`, `url`, `description`, and the sign-in as flat fields: `signin_kind` (`none`, `oauth-device` or `bearer-env`) with that kind's own fields, which are `tenant`, `client_id` and `scopes` (on one line, separated by spaces), or `variable` | `signin_kind`: `none` |
+| `connect` | `flow`: `device`, or `browser`, which its title calls a browser on the hive's machine | `device` |
+| `reclass-tool` | `class`: `write` (a person approves each call), `hidden` (minds don't see the tool and nobody can run it) or `default` (`write` unless a person accepted the tool as read) | none: the select starts on no choice, and a person picks one |
+
+A page sends flat values, hence `add-server`'s flat fields for the sign-in;
+a `signin` object sent directly still wins ("Add a server", below).
+`reclass-tool` without `class`, which is what a page sends while the select
+is on no choice, is refused as before. The `done` result of a people's
+action carries the view after the change (`graph`), at the focus the page
+sent, so the page shows the change at once. A `refused` result carries no
+view, and a `stale` one the current view, as before.
+
+On 18 Nov 2026, on build 0.38 and a real tenant, a server was added from
+that page with *Add a server* (the flat fields, with the Microsoft sign-in)
+and signed in to with *Sign in to this server* and the browser choice
+(the example's README, *On a scratch hive*). `reclass-tool`'s choice was
+declared after that run, in the shape MesTTo gave on #14: the page draws a
+`oneOf` with titles as a select, and sends the `const`.
 
 A tool is `read` only when the server marks it `readOnlyHint`, **a person has
 accepted it** with `accept-reads`, its definition is **still the one they
@@ -368,14 +380,16 @@ ran 0.2.0:
 
 Also in 0.3.0:
 
-- **A hive page can ask for the inputs of `add-server` and `connect`**
-  (MesTTo's #14, for a hive with omegahive #403; "Actions", above). Both
-  declare them as form fields, and `add-server` takes the sign-in as flat
-  fields too (`signin_kind` and that kind's own). `add-server` moves from
-  `applies_to: ["server"]` to `[]`: a page that offers an action only on a
-  selected item, as the Mac test build's did before 0.38 (read in 0.33 and
-  0.37), no longer offers it. Such a page sends an action without inputs, so
-  it could not add a server before either.
+- **A hive page can ask for the inputs of `add-server`, `connect` and
+  `reclass-tool`** (MesTTo's #14, for a hive with omegahive #403; "Actions",
+  above). They declare them as form fields, and `add-server` takes the
+  sign-in as flat fields too (`signin_kind` and that kind's own).
+  `reclass-tool` takes `class` as it did, and still refuses a call without
+  one. `add-server` moves from `applies_to: ["server"]` to `[]`: a page that
+  offers an action only on a selected item, as the Mac test build's did
+  before 0.38 (read in 0.33 and 0.37), no longer offers it. Such a page
+  sends an action without inputs, so it could not add a server before
+  either.
 - **The `done` result of a people's action carries the view after the
   change** (`graph`; #14), `connect`'s next to the code or the sign-in
   address, which the view never shows.
@@ -441,7 +455,7 @@ Behaviour that changes for a hive that ran 0.1.0:
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests        # 99 tests, mock MCP servers on localhost, no outside network
+python -m pytest -q tests        # 102 tests, mock MCP servers on localhost, no outside network
 ```
 
 Both suites (this one and `examples/teams-mcp`) pass with MCP SDK 2.3 and
@@ -484,14 +498,14 @@ Coverage against the brief's definition of done:
 | An identical retry returning the recorded result | `test_identical_retry_returns_the_recorded_result`, `test_app_level_idempotency_also_holds`, `test_a_recovery_answers_from_the_apps_record_or_the_hives` |
 | Tokens never in results, views or logs | `test_tokens_never_appear_in_results_views_traces_or_logs`, `test_device_code_sign_in_and_revoke`, `test_browser_sign_in_finishes_on_a_loopback_listener` |
 | `programs_check` passes | COMPATIBLE with the pre-release copy: `cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-connect`, and with the checker of the Mac test build 0.33, which loads the app from `HIVE_PLUGIN_DIRS` (17 Nov 2026). It sees only an empty view, so `test_contract.py` checks fuller views and every result with the hive's validators |
-| Live demo: read a Teams channel, then a write a person approves | run on a real tenant with `examples/teams-mcp/demo.py`, in the repository's fake hive (13 Nov 2026: the channel read, a message posted once approved), and on a scratch hive, as a named person, with `examples/teams-mcp/hive_demo.py`, which makes the mind's calls with the mind's token (the example's README, *On a scratch hive*): recorded on 17 Nov 2026 on the Mac test build 0.34, and run again to its end on 18 Nov 2026 on build 0.37 with the browser sign-in of 0.3.0, the tenant's security defaults on. `test_demo.py`, `test_hive_demo.py` and the last test of `test_server.py` rehearse it offline |
+| Live demo: read a Teams channel, then a write a person approves | run on a real tenant with `examples/teams-mcp/demo.py`, in the repository's fake hive (13 Nov 2026: the channel read, a message posted once approved), and on a scratch hive, as a named person, with `examples/teams-mcp/hive_demo.py`, which makes the mind's calls with the mind's token (the example's README, *On a scratch hive*): recorded on 17 Nov 2026 on the Mac test build 0.34, run again to its end on 18 Nov 2026 on build 0.37 with the browser sign-in of 0.3.0, the tenant's security defaults on, and once more that day on build 0.38, where the server was added and the sign-in made on the app's page, and the script found both in place. `test_demo.py`, `test_hive_demo.py` and the last test of `test_server.py` rehearse it offline |
 
 Coverage of the first review's changes:
 
 | Change | Tests |
 |---|---|
 | Every tool of a new server is `write` until a person accepts its reads (people only, confirmed; whole server or one tool; only `readOnlyHint` tools) | `test_a_new_servers_tools_stay_write_until_a_person_accepts_its_reads`, `test_accept_reads_for_one_tool` |
-| The owner can only make a tool stricter | `test_the_owner_can_only_make_a_tool_stricter` |
+| The owner can only make a tool stricter; a hidden tool runs for nobody, the owner included | `test_the_owner_can_only_make_a_tool_stricter` |
 | A changed definition drops back to `write`, the view says *changed since review*; `tools/list_changed` reloads the list; the digest covers the full description | `test_a_changed_tool_definition_drops_back_to_write`, `test_a_tool_relabelled_read_only_after_the_review_stays_write` |
 | The list is loaded again on every new session, also after a server restart (HTTP 404 for the old session) | `test_a_restarted_server_gets_a_new_session_with_its_tools_loaded_again` |
 | `accept-reads` applies to the definitions the person saw | `test_accepting_reads_needs_the_page_the_person_saw` |
@@ -516,6 +530,8 @@ Coverage of what a hive page can ask for (#14, 0.3.0):
 |---|---|
 | `add-server` on `applies_to: []`; its inputs and `connect`'s `flow` declared as form fields | `test_a_hive_page_can_ask_for_add_server_and_connect_inputs` |
 | The browser choice of `flow` names the hive's machine, where the listener is | `test_the_browser_choice_of_connect_names_the_hives_machine` |
+| `reclass-tool` declares `class` as a choice of `write`, `hidden` or `default`, each with a title, and no default | `test_a_hive_page_can_ask_which_class_reclass_tool_sets` |
+| Each of those choices, sent as a page sends it, is carried out, and the answer's view shows the tool's new class; without `class` the app still refuses, and changes nothing | `test_every_class_a_page_offers_reaches_the_tool`, `test_reclass_tool_without_a_class_is_still_refused` |
 | The sign-in as a page's flat fields stores the same server as the `signin` object, which still wins | `test_add_server_takes_the_sign_in_as_a_pages_flat_fields` |
 | A change returns the view after it, at the focus the page sent; a refused one returns none; a focus that is no item leaves the change done | `test_a_change_from_the_page_returns_the_view_after_it`, `test_a_focus_that_is_no_item_leaves_the_change_done` |
 | `connect`'s result carries the code, or the sign-in address, next to that view and never in it | `test_device_code_sign_in_and_revoke`, `test_browser_sign_in_finishes_on_a_loopback_listener` |
@@ -566,7 +582,8 @@ settled points 4 and 6 on issue #1.
    `[]` since 0.3.0 (MesTTo's #14): PROGRAMS.md, section 2, now gives the
    empty list that meaning, an action on the app itself, which takes no item
    and which the page lists when nothing is selected (omegahive #403; read
-   in the Mac test build 0.38, the first to have it).
+   in the Mac test build 0.38, the first to have it, where a server was
+   added that way on 18 Nov 2026).
 3. **Verified: `act()` is told who approved.** PROGRAMS.md does not say so;
    `hive/core/program_actions.py` (832b36e) does. On the minds' route under
    "ask", the hive answers `approval_required` with an `approval_id`; when the
