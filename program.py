@@ -168,12 +168,13 @@ def describe():
             {"id": "reclass-tool", "label": "Reclass tool (write, hidden or default)", "applies_to": ["tool"],
              "confirm": True},
             # approver "person" here too: a sign-in always belongs to a named person, so the hive refuses
-            # connect to the local operator password (403 person_required).
+            # connect to the local operator password (403 person_required). The browser flow comes back to a
+            # listener of the app on the hive's machine (_browser_signin), so its choice says where the browser is.
             {"id": "connect", "label": "Sign in to this server", "applies_to": ["server"], "confirm": True,
              "approver": "person", "params": {"flow": {
                  "type": "string", "title": "How to sign in", "default": "device",
                  "oneOf": [{"const": "device", "title": "A code to enter on another device"},
-                           {"const": "browser", "title": "Sign in in a browser here"}]}}},
+                           {"const": "browser", "title": "Sign in in a browser on the hive's machine"}]}}},
             {"id": "revoke", "label": "Revoke sign-in", "applies_to": ["server"], "confirm": True},
         ],
     }
@@ -689,7 +690,7 @@ def view(ctx, focus, stage):
     graph = {
         "revision": _revision(swarm, store),
         "title": "Tool connections",
-        "focus": focus if focus in ids else None,
+        "focus": focus if isinstance(focus, str) and focus in ids else None,
         "items": items,
         "links": links,
         "groups": groups,

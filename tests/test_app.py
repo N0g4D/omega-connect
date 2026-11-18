@@ -252,6 +252,24 @@ def test_a_change_from_the_page_returns_the_view_after_it(hive, demo_url):
     assert "graph" not in add(hive, "s1", "odd", demo_url, signin_kind="password")   # refused: nothing changed
 
 
+def test_a_focus_that_is_no_item_leaves_the_change_done(hive, demo_url):
+    """The view after a change takes the focus the page sent. One that is no item of the view, or no id at all, is
+    no reason to call a change that was made an error: the view then starts at the beginning."""
+    added = add(hive, "s1", "demo", demo_url, focus=["server:demo"], stage="unfold")
+    assert added["status"] == "done" and added["graph"]["focus"] is None
+    gone = add(hive, "s1", "other", demo_url, focus="server:gone", stage="nowhere")
+    assert gone["status"] == "done" and gone["graph"]["focus"] is None
+    assert set(hive.program.store_mod.SwarmStore("s1").servers()) == {"demo", "other"}
+
+
+def test_the_browser_choice_of_connect_names_the_hives_machine(program):
+    """What a hive page offers for connect's flow. The browser sign-in comes back to a listener of the app on the
+    hive's machine (RFC 8252, 7.3), so its choice says where the browser has to be, as connect's result does."""
+    flow = {a["id"]: a for a in program.describe()["actions"]}["connect"]["params"]["flow"]
+    titles = {choice["const"]: choice["title"] for choice in flow["oneOf"]}
+    assert "a browser on the hive's machine" in titles["browser"]
+
+
 # ------------------------------------------------------------------ done #2
 
 def test_lists_servers_and_tools(hive, demo_url):
@@ -1012,8 +1030,9 @@ def test_device_code_sign_in_and_revoke(hive, guarded_url, fake_authority, tmp_p
     assert started["detail"]["user_code"] == "ABCD-1234" and "ABCD-1234" in started["message"]
     assert fake_authority.scopes == ["Mail.Read openid profile offline_access"]
     waiting = run(hive.view("s1", PERSON))
-    assert "ABCD-1234" not in json.dumps(waiting)
-    assert "not signed in; a sign-in started by" in text_of(waiting, "server:m365")
+    for shown in (waiting, started["graph"]):  # the view, also the one that comes back with the code
+        assert "ABCD-1234" not in json.dumps(shown)
+        assert "not signed in; a sign-in started by" in text_of(shown, "server:m365")
     for _ in range(50):
         if store_cls("s1").has_credentials("m365"):
             break
@@ -1216,8 +1235,15 @@ def test_browser_sign_in_finishes_on_a_loopback_listener(hive, guarded_url, fake
     # What an app registration with the redirect URI http://localhost takes: Entra ignores the port.
     assert re.fullmatch(r"http://localhost:[1-9][0-9]{0,4}", query["redirect_uri"])
     assert started["detail"]["redirect_uri"] == query["redirect_uri"] and len(query["state"]) >= 32
+    # Next to the address, the result carries the view after connect, as every change from a page does; like any
+    # view, it says that a sign-in is in progress and nothing of its address.
+    beside_the_address = started["graph"]
+    assert "not signed in; a sign-in started by" in text_of(beside_the_address, "server:m365")
     waiting = run(hive.view("s1", PERSON))
-    assert query["state"] not in json.dumps(waiting) and query["code_challenge"] not in json.dumps(waiting)
+    assert waiting["revision"] == beside_the_address["revision"]
+    for shown in (json.dumps(beside_the_address), json.dumps(waiting)):
+        assert query["state"] not in shown and query["code_challenge"] not in shown
+        assert query["redirect_uri"] not in shown and "/authorize" not in shown
     assert "not signed in; a sign-in started by" in text_of(waiting, "server:m365")
     landed = fake_authority.authorize(address)  # the person signs in, and their browser comes back
     status, page = browse(landed)
@@ -1237,11 +1263,13 @@ def test_browser_sign_in_finishes_on_a_loopback_listener(hive, guarded_url, fake
     after = mind(hive, "s1", "read-tool", "k1", server="m365", tool="add", arguments={"a": 20, "b": 22})
     assert after["detail"]["result"]["text"] == "42"  # the token from the browser sign-in was sent
     printed = capfd.readouterr()
-    apart_from_the_result = [page, waiting, run(hive.view("s1", PERSON)), after, store.traces(50), printed.out,
-                             printed.err]
-    assert_no_secrets([started, *apart_from_the_result], tmp_path, caplog, SECRET, REFRESH, sent["code_verifier"],
+    apart_from_the_address = [page, beside_the_address, waiting, run(hive.view("s1", PERSON)), after,
+                              store.traces(50), printed.out, printed.err]
+    assert_no_secrets([started, *apart_from_the_address], tmp_path, caplog, SECRET, REFRESH, sent["code_verifier"],
                       AUTH_CODE, *fake_authority.id_tokens)
-    assert query["state"] not in json.dumps(apart_from_the_result) + caplog.text  # the address: in the result alone
+    # the address: in the message and the detail of connect's result alone
+    assert query["state"] not in json.dumps(apart_from_the_address) + caplog.text
+    assert {key for key, value in started.items() if query["state"] in json.dumps(value)} == {"message", "detail"}
 
 
 def test_only_the_redirect_with_its_state_completes_a_browser_sign_in(hive, guarded_url, fake_authority):
