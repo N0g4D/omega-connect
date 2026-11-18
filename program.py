@@ -167,8 +167,16 @@ def describe():
             {"id": "remove-server", "label": "Remove server", "applies_to": ["server"], "confirm": True},
             {"id": "accept-reads", "label": "Accept read-only tools (whole server or one tool)",
              "applies_to": ["server", "tool"], "confirm": True},
+            # Its one input is a choice a page asks for first. No default: the page's select starts on no choice, a
+            # person picks one, and a field left blank is not sent, which _reclass_tool refuses. No "read" among
+            # the choices: only accept-reads makes a tool read.
             {"id": "reclass-tool", "label": "Reclass tool (write, hidden or default)", "applies_to": ["tool"],
-             "confirm": True},
+             "confirm": True, "params": {"class": {
+                 "type": "string", "title": "Treat it as",
+                 "oneOf": [{"const": WRITE, "title": "Write, a person approves each call"},
+                           {"const": HIDDEN, "title": "Hidden, minds don't see it and nobody can run it"},
+                           {"const": "default",
+                            "title": "Back to default, write unless a person accepted it as read"}]}}},
             # approver "person" here too: a sign-in always belongs to a named person, so the hive refuses
             # connect to the local operator password (403 person_required). The browser flow comes back to a
             # listener of the app on the hive's machine (_browser_signin), so its choice says where the browser is.

@@ -58,6 +58,14 @@ def review(hive, swarm, server):
     return accepted
 
 
+def reclass_on_page(hive, swarm, tool, fields):
+    """reclass-tool as a hive page sends it for the tool a person selected (`tool` is server/tool): the fields of its
+    form that are filled in, flat, with the page's focus and stage, which the host sends with every act."""
+    item = f"tool:{tool}"
+    return run(hive.person_act(swarm, PERSON, "reclass-tool", [item], {**fields, "focus": item, "stage": "unfold"},
+                               confirmed=True))
+
+
 def redefine(hive, swarm, tool, description, read_only=True):
     """The server changes one of its tools and says so (tools/list_changed). A person's use-tool of
     the demo server's `redefine` is only the trigger."""
@@ -274,6 +282,53 @@ def test_the_browser_choice_of_connect_names_the_hives_machine(program):
     flow = {a["id"]: a for a in program.describe()["actions"]}["connect"]["params"]["flow"]
     titles = {choice["const"]: choice["title"] for choice in flow["oneOf"]}
     assert "a browser on the hive's machine" in titles["browser"]
+
+
+def test_a_hive_page_can_ask_which_class_reclass_tool_sets(program):
+    """reclass-tool declares its one input, class, as a choice with titles (MesTTo on #14): a hive page draws it as a
+    select and sends the const of the class a person chose. It has no default, so the select starts on no choice and
+    the person picks one. read is not among the choices: only accept-reads makes a tool read."""
+    inputs = {a["id"]: a for a in program.describe()["actions"]}["reclass-tool"].get("params") or {}
+    assert list(inputs) == ["class"]
+    cls = inputs["class"]
+    assert cls["type"] == "string" and cls["title"]
+    assert [choice["const"] for choice in cls["oneOf"]] == ["write", "hidden", "default"]
+    assert all(choice["title"] not in ("", choice["const"]) for choice in cls["oneOf"])   # each says what it does
+    assert "default" not in cls   # no key of that name: a page fills a default in, and would send it untouched
+
+
+def test_every_class_a_page_offers_reaches_the_tool(hive, demo_url):
+    """Each choice reclass-tool declares, sent as a page sends it, is carried out: the answer's view shows the tool's
+    new class at the page's focus, and a mind's list-tools goes by it."""
+    add(hive, "s1", "demo", demo_url)
+    review(hive, "s1", "demo")
+    declared = (hive.actions["reclass-tool"].get("params") or {}).get("class") or {}
+    shown = {"write": "Class: write (set by the owner; accepted by person:ada)",
+             "hidden": "Class: hidden (set by the owner; accepted by person:ada)",
+             "default": "Class: read (accepted by person:ada)"}
+    listed = {"write": "write", "hidden": None, "default": "read"}   # hidden: a mind's list-tools leaves the tool out
+    assert [choice["const"] for choice in declared.get("oneOf", [])] == list(shown)
+    for choice in shown:
+        done = reclass_on_page(hive, "s1", "demo/add", {"class": choice})
+        assert done["status"] == "done", done
+        assert done["graph"]["focus"] == "tool:demo/add"
+        assert text_of(done["graph"], "tool:demo/add").splitlines()[0] == shown[choice]
+        tools = mind(hive, "s1", "list-tools", "k1", server="demo")["detail"]["tools"]["demo"]
+        assert {tool["name"]: tool["class"] for tool in tools}.get("add") == listed[choice]
+
+
+def test_reclass_tool_without_a_class_is_still_refused(hive, demo_url):
+    """A page leaves a blank field out: while the select is on no choice, reclass-tool comes without class. The app
+    refuses it as it did before the input was declared, names the classes it takes and changes nothing."""
+    add(hive, "s1", "demo", demo_url)
+    review(hive, "s1", "demo")
+    for blank in ({}, {"class": ""}, {"class": None}):   # a page sends the first; a direct call may send the others
+        refused = reclass_on_page(hive, "s1", "demo/add", blank)
+        assert refused["status"] == "refused" and refused["message"] == "class must be write, hidden or default"
+        assert "graph" not in refused   # nothing changed: no view to put in place of the page's
+    assert "reclass" not in hive.program.store_mod.SwarmStore("s1").servers()["demo"]
+    still_read = mind(hive, "s1", "read-tool", "k1", server="demo", tool="add", arguments={"a": 1, "b": 1})
+    assert still_read["status"] == "done"
 
 
 # ------------------------------------------------------------------ done #2
@@ -660,6 +715,10 @@ def test_the_owner_can_only_make_a_tool_stricter(hive, demo_url):
     assert reclass("whoami", "hidden")["status"] == "done"
     names = [t["name"] for t in mind(hive, "s1", "list-tools", "k3", server="demo")["detail"]["tools"]["demo"]]
     assert "whoami" not in names
+    # hidden is for everybody, as its title on a page says: a mind's read and the owner's own call find no such tool
+    for answer in (read("whoami", "k4"),
+                   run(hive.person_act("s1", PERSON, "use-tool", [], {"server": "demo", "tool": "whoami"}))):
+        assert answer["status"] == "refused" and "no available tool 'whoami'" in answer["message"]
 
 
 def test_a_changed_tool_definition_drops_back_to_write(hive, demo_url):
