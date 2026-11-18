@@ -13,10 +13,13 @@ script sends the same request again with the approval_id.
 You are the hive's owner, a named person. What the hive's pages can do, you do
 there, and the script waits and goes on by itself: accept-reads on the app's page,
 the approval on the Approvals page (it can send either with your sign-in if you
-choose so). What the pages cannot do yet, the script does with your sign-in, after
-a yes at the terminal: add-server, whose parameters the page has no form for, and
-connect with the browser sign-in. It also makes the demo mind and its three rules,
-since the mind's token is returned only by the request that creates it.
+choose so). add-server and connect with the browser sign-in the script sends with
+your sign-in, after a yes at the terminal, when it finds no server or no sign-in:
+up to build 0.37 the app's page has no form for their inputs. From build 0.38 the
+page asks for them, so both can be done there before the run (Add a server, then
+Sign in to this server), and the script finds them in place. It also makes the
+demo mind and its three rules, since the mind's token is returned only by the
+request that creates it.
 
 Your session comes from a one-time link (omegahive.sh signin-url) and is ended when
 the script stops. That link, your session's token, the mind's token and the hive's
@@ -441,7 +444,7 @@ class HiveDemo:
                  "(Revoke sign-in, Remove server) and the swarm's.")
 
     def add_server(self) -> None:
-        self.step("add-server", "you, confirmed here: the app's page has no form for its parameters")
+        self.step("add-server", "you, confirmed here, or on the app's page from build 0.38 (Add a server)")
         there = self.server_item()
         if there is not None:
             lines = there["text"].splitlines()
@@ -480,8 +483,9 @@ class HiveDemo:
     def connect(self) -> None:
         """connect with the browser sign-in (authorization code with PKCE; the app, inside the hive,
         listens on this machine for the browser to come back, and finishes the sign-in by itself).
-        The app's page can only send connect without parameters, which is the device code; a tenant
-        whose security defaults block that code needs {"flow": "browser"}, so the script sends it."""
+        Up to build 0.37 the app's page sends connect without inputs, which is the device code; a
+        tenant whose security defaults block that code needs {"flow": "browser"}, so the script sends
+        it. From build 0.38 the page asks which sign-in, and one made there is found in place here."""
         self.step("connect", f"you, confirmed here: the {'device code' if self.device_code else 'browser sign-in'}")
         state = self.signin_line()
         if "signed in by" in state:

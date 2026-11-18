@@ -632,6 +632,8 @@ def test_the_mind_reads_and_posts_only_after_the_person_approves_in_the_hive(sta
                   f"mind      connect-scout ({mind['id']}), created",
                   "rules     list-tools allow, read-tool allow, use-tool ask",
                   f"{hive.base}/#/program/omega-connect/{swarm}",
+                  "[2] add-server  ·  you, confirmed here, or on the app's page from build 0.38 (Add a server)",
+                  "[3] connect  ·  you, confirmed here: the browser sign-in",
                   "sign-in   oauth-device · tenant aaaaaaaa… · client 11111111…",
                   "The sign-in page is open in your browser", "post_channel_message     write",
                   "accepted by person:ada", "write: post_channel_message", "Hi Bob, the demo is at 3pm",
@@ -645,6 +647,7 @@ def test_the_mind_reads_and_posts_only_after_the_person_approves_in_the_hive(sta
                   "none carries a value shaped like an access token", "Demo complete.",
                   "Signed out of the hive: this run's session is ended."):
         assert shown in out, shown
+    assert "no form" not in out  # build 0.38's page asks for add-server's inputs: the step no longer says it cannot
     shown_nowhere(run, hive, TENANT, CLIENT_ID, run.browser_address())
 
     # The mind's calls: its own token, no Origin, a body that names neither the mind nor its swarm.
