@@ -64,10 +64,32 @@ what it gets.
 A page sends flat values, hence `add-server`'s flat fields for the sign-in;
 a `signin` object sent directly still wins ("Add a server", below).
 `reclass-tool` without `class`, which is what a page sends while the select
-is on no choice, is refused as before. The `done` result of a people's
-action carries the view after the change (`graph`), at the focus the page
-sent, so the page shows the change at once. A `refused` result carries no
-view, and a `stale` one the current view, as before.
+is on no choice, is refused as before.
+
+**The view comes back with what a person does.** Every `done` result of an
+act that a person runs carries the view after it (`graph`), at the focus
+their page sent: the people's actions (#14), and `list-servers`,
+`list-tools`, `inspect-tool`, `read-tool` and `use-tool` when a person runs
+them. The local operator password counts as a person here, as the hive has
+it: the hive's person route gives every caller the kind `person`, so the
+operator's `add-server`, `remove-server`, `accept-reads`, `reclass-tool`
+and `revoke` come back with the view too (the hive refuses it `connect` and
+`use-tool`, which declare `approver: "person"`). A hive page keeps the view
+it has unless a `done` result brings one,
+and sends that view's revision with its next act. So after `list-tools` the
+tools are on the page at once and the first `accept-reads` passes, where it
+came back `stale`; after `read-tool` and `use-tool` the view has the line
+of the call. What a mind does brings no view to a person's page: after a
+mind's `list-tools` the page shows the tools when it next asks for the
+view, and an `accept-reads` sent before that comes back `stale`, with the
+current view. An answer to a mind never carries a view, whatever the action:
+the view shows what a mind is not told, which is the tools the owner hid,
+who signed in and the recent calls. The view is added last, to the answer
+alone: neither the trace nor the answers `use-tool` keeps for retries hold
+one. If it cannot be made, the act stays `done` without it: a change that
+was made, or a call that went out, never becomes an error because of the
+view. A `refused` result carries no view, and a `stale` one the current
+view, as before.
 
 On 18 Nov 2026, on build 0.38 and a real tenant, a server was added from
 that page with *Add a server* (the flat fields, with the Microsoft sign-in)
@@ -269,7 +291,10 @@ through once it had signed out of Microsoft. The app opens a listener on a
 free port of the loopback interface of
 the hive's machine and uses `http://localhost:<port>` as the redirect
 address. The result gives the address to open to the person who ran
-`connect`, and only to them: the view never shows it. They sign in, their
+`connect`, and only to them: the view never shows it. Its message says
+first what to do, where and within how long, and ends with the address,
+which is in `detail.authorization_url` too: a hive page also shows the
+message in a notice, which cuts a long address short. They sign in, their
 browser comes back to the listener with a code, and the app trades the code
 for tokens, with its PKCE verifier and the same redirect address, and keeps
 them under that person. As with the device code, the sign-in completes on
@@ -366,7 +391,8 @@ Microsoft moves an ordinary browser from the `nativeclient` page to
 ran 0.2.0:
 
 - **`connect` with `{"flow": "browser"}` answers `done`** with the address
-  to open, and the app completes the sign-in by itself when the person's
+  to open, at the end of its message and in `detail.authorization_url`, and
+  the app completes the sign-in by itself when the person's
   browser comes back to `http://localhost:<port>` ("Add a server", above).
   `connect` no longer takes `redirect_url` and never answers `needs_input`.
 - **The app registration needs another redirect URI:** `http://localhost`
@@ -394,9 +420,11 @@ Also in 0.3.0:
   before 0.38 (read in 0.33 and 0.37), no longer offers it. Such a page
   sends an action without inputs, so it could not add a server before
   either.
-- **The `done` result of a people's action carries the view after the
-  change** (`graph`; #14), `connect`'s next to the code or the sign-in
-  address, which the view never shows.
+- **Every `done` result of a person's act carries the view after it**
+  (`graph`): the people's actions since #14, `connect`'s next to the code or
+  the sign-in address, which the view never shows, and `list-servers`,
+  `list-tools`, `inspect-tool`, `read-tool` and `use-tool` when a person
+  runs them. An answer to a mind carries none ("Actions", above).
 - **A sign-in in progress ends with its server, or with the person's next
   `connect` on it**, whichever flow started it. 0.2.0 went on asking Microsoft
   about a device code after `remove-server`, and kept the token that came,
@@ -459,7 +487,7 @@ Behaviour that changes for a hive that ran 0.1.0:
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests        # 102 tests, mock MCP servers on localhost, no outside network
+python -m pytest -q tests        # 109 tests, mock MCP servers on localhost, no outside network
 ```
 
 Both suites (this one and `examples/teams-mcp`) pass with MCP SDK 2.3 and
@@ -538,6 +566,11 @@ Coverage of what a hive page can ask for (#14, 0.3.0):
 | Each of those choices, sent as a page sends it, is carried out, and the answer's view shows the tool's new class; without `class` the app still refuses, and changes nothing | `test_every_class_a_page_offers_reaches_the_tool`, `test_reclass_tool_without_a_class_is_still_refused` |
 | The sign-in as a page's flat fields stores the same server as the `signin` object, which still wins | `test_add_server_takes_the_sign_in_as_a_pages_flat_fields` |
 | A change returns the view after it, at the focus the page sent; a refused one returns none; a focus that is no item leaves the change done | `test_a_change_from_the_page_returns_the_view_after_it`, `test_a_focus_that_is_no_item_leaves_the_change_done` |
+| Every `done` act of a person carries the view, at the page's focus: `list-tools` brings the tools into it, and the first `accept-reads` with its revision passes; `read-tool` and `use-tool` bring the line of the call | `test_a_persons_list_tools_brings_the_tools_into_the_view`, `test_every_done_act_of_a_person_carries_the_view` |
+| An answer to a mind never carries a view, whatever the action and however it ends; nor does one to a caller the hive does not name | `test_a_mind_never_gets_the_view` |
+| The local operator password's changes from the page (`add-server`, `remove-server`, `accept-reads`, `reclass-tool`, `revoke`) and its `list-tools` come back with the view: the hive's person route gives it the kind `person` | `test_the_local_operators_changes_from_the_page_carry_the_view` |
+| The view enters no record: the answer `use-tool` keeps holds none, a retry answered from it gets the view as it is by then, and the trace has nothing of one | `test_the_view_enters_no_record` |
+| A view that cannot be made leaves the act `done`, without one, for the people's actions too; the log names the failure by its type only | `test_a_view_that_fails_leaves_the_act_done` |
 | `connect`'s result carries the code, or the sign-in address, next to that view and never in it | `test_device_code_sign_in_and_revoke`, `test_browser_sign_in_finishes_on_a_loopback_listener` |
 
 Coverage of the browser sign-in on a loopback listener, and of how a sign-in
@@ -546,6 +579,7 @@ in progress ends (0.3.0):
 | Behaviour | Tests |
 |---|---|
 | The sign-in completes on the listener: redirect address `http://localhost:<port>`, PKCE and state, the same redirect address when the code is traded, the sign-in kept under the person who ran `connect`, a fixed page for the browser; the address only in the `connect` result; no code or token in results, views, traces or logs | `test_browser_sign_in_finishes_on_a_loopback_listener` |
+| The message of the browser sign-in says first what to do, where and within how long, and ends with the address, which is in the detail too | `test_the_browser_sign_ins_message_says_what_to_do_before_the_address` |
 | Only a GET with the sign-in's state completes it: an icon request, a wrong, missing or repeated state, another path, another method or bytes that are no request get one fixed error page, which carries nothing of the request, and leave the sign-in waiting | `test_only_the_redirect_with_its_state_completes_a_browser_sign_in` |
 | A connection that sends nothing, or half a request, holds up no sign-in | `test_a_connection_that_sends_no_request_holds_up_no_sign_in` |
 | An error from Microsoft, in the redirect or when the code is traded: in the trace, a fixed page that repeats none of it, the listener closed | `test_a_browser_sign_in_that_ends_with_an_error_is_traced_and_closed` |

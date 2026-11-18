@@ -32,8 +32,10 @@ The brief, in short:
   message, detail?, graph?, task?}`. `started` needs `task.id`.
 - Return `stale` (with the current graph) when `params.base_revision` is old.
 - A `done` result's `graph` replaces the page's view (PROGRAMS.md 3), and the
-  host sends `params.focus` and `params.stage` with every act (6b.2). The done
-  results of the people's actions carry `view()` at that focus (MesTTo's #14).
+  host sends `params.focus` and `params.stage` with every act (6b.2). Every
+  done result of a person's act carries `view()` at that focus: the people's
+  actions since MesTTo's #14, every other action since 18 Nov 2026. An answer
+  to a mind never does.
 - An action's `params` in `describe()` names its inputs. PROGRAMS.md 2 of
   04fc3f2 has only words for each; since omegahive #403 (the issue; its pull
   request #416 closed it, MesTTo on #14; read in the Mac test build 0.38, the
@@ -77,7 +79,12 @@ The brief, in short:
   raised is failed: its identical retry comes back after a new approval with
   the same `record_id` and no `prior_failed` (only `person_activity` actions,
   on the person route, get that). The person route records nothing for our
-  actions: `record_id` None.
+  actions: `record_id` None. Only two kinds of caller reach `act()`: the
+  person route gives every caller the kind `person`, the local operator
+  password included (principal `user:operator`, `local_operator` true), and
+  the minds' route gives `mind`; only the reader's shape that `view()` and
+  `read()` get names the operator apart (verified on 18 Nov 2026, the same
+  in 0.38). So the operator's changes from the page carry the view too.
 - The Mac test build in `~/OmegaHive` (read it, never copy or quote its code
   here). The app was mounted and checked on 0.33 (f6b4b1c), and what follows
   was read in that build's `hive/core` and page source on 17 Nov 2026. The
@@ -113,6 +120,36 @@ The brief, in short:
   finds none, it sends add-server and connect itself, on any of these
   builds. reclass-tool's choice was declared after that run, and no page
   has sent it yet (Next steps, 3).
+- What the page of 0.38 does with an action's result, read in the build's
+  page source and `hive/core` on 18 Nov 2026; PROGRAMS.md says none of it
+  unless noted:
+  - When it asks for the view: when the app's page opens, at a navigation
+    step (unfold, follow, open, back), after a `stale` result, and after a
+    resync of its event stream. Never after a `done` result without `graph`:
+    it keeps the view it has. It sends that view's revision as
+    `base_revision` with every act, whatever the action, and knows nothing
+    of `effect`. Hence the rule above: List tools left the page without the
+    tools, and the first accept-reads from it came back `stale`.
+  - `executed_now` (or `executed`) is a convention of the page, outside the
+    contract: a boolean at the top of `detail` that sets the label of a
+    done result's panel, "Ran now" for true, "Banked · not run now" for
+    false, "Not stated whether this ran now" without it. It came with the
+    Tools app; PROGRAMS.md does not name it and the hive's server does not
+    read it. The app does not set it until MesTTo says how it is meant: the
+    hive replays a mind's recorded answer as it was stored, so a stored true
+    would be replayed as well.
+  - No links, by choice: a result's message and detail are drawn as plain
+    text, and nothing an action returns becomes a link. The page links only
+    a source's `url`, for references; `open-url` (PROGRAMS.md 9c) is for an
+    app with its own `ui/`. So a sign-in address is copied from the result:
+    the notice cuts it short, the panel's field shows it whole.
+  - The hive keeps nothing of a person's act result: an action without
+    `person_activity` has no intent record (PROGRAMS.md 9d) and no event on
+    the bus, and the activity feed has rows for minds' acts only, without
+    their results. The result reaches the caller's page alone, which keeps
+    it in memory: the panel until it is closed or the person moves on, the
+    notice for a few seconds. A mind's act that is no read is stored whole
+    in the hive's record, and returned to its identical retry.
 - Failed writes (Jon on #1): repeat automatically only when the attempt
   certainly did not arrive (a refused connection; for use-tool also a 404
   for a session the server no longer has, which ran nothing, and after which
@@ -143,7 +180,9 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
   the `signin` object from a page's flat fields, and an object sent directly
   wins. connect's `flow` and reclass-tool's `class` are choices declared in
   `describe()` itself, `class` with no default and no `read` among its
-  choices. `act()` adds `view()` to the done results of the people's actions.
+  choices. `act()` adds `view()` last, to every done result of a person's
+  act (`_act` makes the result): never for a mind, into no record, and a
+  view that fails leaves the result done without one.
 - `connect/engine.py`: MCP client. One private asyncio loop in a daemon
   thread; one long-lived task per (swarm, server) owns transport and
   ClientSession (anyio cancel scopes must stay in one task). Callers submit
@@ -222,7 +261,9 @@ is write until then. The owner can demote (write, hidden, back to default),
 never promote. The digest catches definition changes, not behaviour changes.
 The device code and the browser sign-in address go only into the message and
 the detail of the `connect` result, never into `view()`, so not into the view
-that this result carries either. The app finishes a browser sign-in by itself,
+that this result carries either. The browser sign-in's message says what to
+do first and ends with the address: the page's notice cuts a long address
+short. The app finishes a browser sign-in by itself,
 when the browser comes back to its listener with the sign-in's state, and
 keeps it under the person who ran connect. That works with the person's
 browser on the hive's machine; a hive shared over a network needs a callback
@@ -232,7 +273,7 @@ address of the hive, not done yet.
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests            # 102 tests, ~2 min, localhost only
+python -m pytest -q tests            # 109 tests, ~2 min, localhost only
 python -m pytest -q examples/teams-mcp   # 54 tests, ~1 min, Graph and the hive's routes simulated
 ```
 
@@ -341,8 +382,16 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
    After that run: reclass-tool declares its input `class` as a choice
    (write, hidden, default; no default), as MesTTo confirmed on #14, and
    `hive_demo.py` no longer says at add-server that the page has no form for
-   its inputs. Still to try: that choice on the hive's page, once the hive
-   has started again with this checkout.
+   its inputs. Still to try: that choice on the hive's page, which the hive
+   has had since it started again at 14:55 that day.
+   Later that day, on the hive started again at 14:55 with the checkout at
+   50bb224: List tools from the page listed the tools in the result's panel
+   and left the view without them, until the page was loaded again. So
+   every done act of a person now carries the view, never a mind's (the
+   contract facts above have what the page of 0.38 does with a result), and
+   connect's message for the browser sign-in ends with the address, where
+   it had it in the middle. The hive has both from its next start: still to
+   try on its page.
 
 Not a step here: the mind skill for native Omega minds is the flagship team's
 (MesTTo on #2: it covers the actions of every app and takes a request up again
