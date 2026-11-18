@@ -31,6 +31,22 @@ The brief, in short:
 - `act()` returns `{status: done|started|needs_input|stale|refused|error,
   message, detail?, graph?, task?}`. `started` needs `task.id`.
 - Return `stale` (with the current graph) when `params.base_revision` is old.
+- A `done` result's `graph` replaces the page's view (PROGRAMS.md 3), and the
+  host sends `params.focus` and `params.stage` with every act (6b.2). The done
+  results of the people's actions carry `view()` at that focus (MesTTo's #14).
+- An action's `params` in `describe()` names its inputs. PROGRAMS.md 2 of
+  04fc3f2 has only words for each; since omegahive #403 (read in the Mac test
+  build 0.38, the first with it; #14 calls it #416) an input is words or one
+  form field in the shape of a property of MCP's elicitation forms (spec
+  2025-11-25): a string, number, integer or boolean, one choice (`enum`, or
+  `oneOf` of `const` with `title`) or several (an array of them), with
+  `title`, `description`, `default`, and `minimum`/`maximum` for a number. The
+  page asks for declared inputs before it sends the action, fills in the
+  defaults, sends each in its type, flat, and leaves a blank field out: the
+  app checks what it gets. `applies_to: []` is an action on the app itself,
+  listed when nothing is selected; no `applies_to` means any kind, or none.
+  The checker and the host's description check (04fc3f2, and 0.38's) look at
+  neither. add-server (on `applies_to: []`) and connect declare theirs.
 - The host refuses bodies with `principal`, `actor`, `swarm_id`, `agent_id`,
   `member_id` or credential-like keys (token, secret, password, api key, any
   `*_key` but its own retry keys such as `idempotency_key`) at the top level of
@@ -57,9 +73,15 @@ The brief, in short:
   the same `record_id` and no `prior_failed` (only `person_activity` actions,
   on the person route, get that). The person route records nothing for our
   actions: `record_id` None.
-- The Mac test build (0.33, f6b4b1c, installed in `~/OmegaHive`; read it,
-  never copy or quote its code here), as read in `hive/core` and its page
-  source on 17 Nov 2026. A person's confirm act needs a token from
+- The Mac test build in `~/OmegaHive` (read it, never copy or quote its code
+  here). The app was mounted and checked on 0.33 (f6b4b1c), and what follows
+  was read in that build's `hive/core` and page source on 17 Nov 2026. The
+  demo recorded that day ran on 0.34 (116bc87), and on 18 Nov it ran with the
+  browser sign-in on 0.37 (58b6406), both on a real tenant; since 10:37 that
+  day the hive is 0.38 (d5485da), on which nothing was run from here. The
+  build updates itself when its owner accepts: `~/OmegaHive/logs/update.log`
+  says when, `app/RELEASE_VERSION` which one is installed; look before
+  naming a build. A person's confirm act needs a token from
   `POST /api/programs/{id}/confirm` (`{swarm_id, action, payload,
   payload_digest}`, PROGRAMS.md 9d), bound to session, swarm, action and
   digest, single use, 120 s. A local-owner session (kind `sso`, principal
@@ -73,7 +95,14 @@ The brief, in short:
   activating needs `offer`/`bind`/`unbind` hooks, which the app lacks
   (409 hooks_missing). The approval's note wakes only an `asleep` mind, not a
   `created` one. Its `hive/core/program_actions.py` is byte for byte the
-  832b36e copy that the fake host follows.
+  832b36e copy that the fake host follows, on 0.34, 0.37 and 0.38 too; on
+  0.37 and 0.38 `programs_check.py` is the 04fc3f2 copy's. Read on 18 Nov: up
+  to 0.37 the
+  page is as above; 0.38 has the page of omegahive #403, which asks for the
+  inputs an action declares and lists the actions on the app itself (add-server,
+  since #14) when nothing is selected, and its PROGRAMS.md 2 has the rules.
+  The routes `hive_demo.py` uses are all in 0.38; it sends add-server and
+  connect itself on any of these builds.
 - Failed writes (Jon on #1): repeat automatically only when the attempt
   certainly did not arrive (a refused connection; for use-tool also a 404
   for a session the server no longer has, which ran nothing, and after which
@@ -100,6 +129,9 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
 
 - `program.py`: describe / view / act. Loads `connect/*.py` by file path
   (`importlib`), because the host imports program.py by path, not as a package.
+  What a page asks for add-server is `ADD_SERVER_INPUTS`; `_flat_signin` makes
+  the `signin` object from a page's flat fields, and an object sent directly
+  wins. `act()` adds `view()` to the done results of the people's actions.
 - `connect/engine.py`: MCP client. One private asyncio loop in a daemon
   thread; one long-lived task per (swarm, server) owns transport and
   ClientSession (anyio cancel scopes must stay in one task). Callers submit
@@ -140,8 +172,13 @@ repo (with `hive/PROGRAMS.md` and `hive.programs_check`) opens ~19–20 Nov.
   of three fixed pages, and nothing of a request is logged or sent back (the
   request line carries the code). `_browser_signin` in program.py trades the
   code in the listener's thread, keeps the sign-in under the person who ran
-  connect and traces the outcome; a later connect of theirs on that server,
-  or remove-server, closes the listener. Standard library only; authority
+  connect and traces the outcome. One sign-in is in progress per person and
+  server (`_PENDING_SIGNINS`): a later connect of theirs on that server, or
+  remove-server, takes it away, which closes the listener and ends the wait
+  for a device code (`poll_device_flow` asks `wanted` before each request);
+  `_keep_signin` keeps the tokens of either flow only while the sign-in is
+  still the one in progress, check and write under `_SIGNIN_LOCK`.
+  Standard library only; authority
   overridable with `OMEGA_CONNECT_OAUTH_AUTHORITY` (tests use a fake). Keeps
   only `preferred_username` from the id_token, to show who signed in.
   Renewal runs in a thread under a lock per (swarm, server), in program.py.
@@ -169,8 +206,9 @@ accepted that tool with `accept-reads` (people only, confirm), and its
 definition digest still matches the accepted one; every tool of a new server
 is write until then. The owner can demote (write, hidden, back to default),
 never promote. The digest catches definition changes, not behaviour changes.
-The device code and the browser sign-in address go only into the `connect`
-result, never into `view()`. The app finishes a browser sign-in by itself,
+The device code and the browser sign-in address go only into the message and
+the detail of the `connect` result, never into `view()`, so not into the view
+that this result carries either. The app finishes a browser sign-in by itself,
 when the browser comes back to its listener with the sign-in's state, and
 keeps it under the person who ran connect. That works with the person's
 browser on the hive's machine; a hive shared over a network needs a callback
@@ -180,8 +218,8 @@ address of the hive, not done yet.
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests            # 91 tests, ~2 min, localhost only
-python -m pytest -q examples/teams-mcp   # 53 tests, ~1 min, Graph and the hive's routes simulated
+python -m pytest -q tests            # 99 tests, ~2 min, localhost only
+python -m pytest -q examples/teams-mcp   # 54 tests, ~1 min, Graph and the hive's routes simulated
 ```
 
 Contract checker, from the pre-release copy next to this repo (until omegahive
@@ -202,6 +240,15 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
 - Keep `describe()` sync and cheap. Keep `view()` deterministic: no network,
   no connecting (the checker compares two views).
 - New behaviour needs a test in `tests/test_app.py` through `FakeHive`.
+- Tests start Python with `sys.executable`, never a `python3` from the PATH.
+  A script that is to get Ctrl-C starts through `Run`
+  (`examples/teams-mcp/test_demo.py`), with SIGINT at its default: pytest
+  runs with it ignored when a shell starts it as a background job.
+- No literal control or bidirectional character in a `.py` file, nor in a
+  document (`.md`, `.json`, `.txt`): write the escape (`\u202e`).
+  `test_the_sources_hold_no_invisible_characters` looks at all of them. An
+  agent's edit tools turn a typed escape into the character itself: put one
+  in with a script, then run that test.
 - Keep the brief's action names; open points are listed in README.md.
 
 ## Next steps
@@ -239,17 +286,34 @@ cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-c
 3. Scratch hive demo, recorded, as a named person (use-tool declares approver
    "person": with the operator password nobody runs or approves a write).
    17 Nov 2026, branch `scratch-hive-demo`: the app is mounted on the Mac test
-   build in `~/OmegaHive` (MesTTo on #2: its owner is a named person), which
-   loads it and whose `programs_check` passes; `examples/teams-mcp/hive_demo.py`
-   plays the mind's part there (README of the example, "On a scratch hive").
+   build in `~/OmegaHive` (MesTTo on #2: its owner is a named person), then
+   0.33, which loads it and whose `programs_check` passes;
+   `examples/teams-mcp/hive_demo.py` plays the mind's part there (README of
+   the example, "On a scratch hive"). The demo was recorded that day, on
+   build 0.34 and a real tenant.
    Same day, branch `loopback-signin`, 0.3.0 (asked for by MesTTo on #2, who
    reviews it): on the real tenant the browser sign-in never got its code,
    since Microsoft took it out of the address the browser landed on
    (`/common/wrongplace`), so the app now finishes that sign-in on a loopback
    listener, and the app registration needs the redirect URI
    `http://localhost` under Mobile and desktop applications. The hive loads
-   the app when it starts: restart it before the demo. Not yet run against
-   the real hive or the tenant: that run is Alessio's.
+   the app when it starts: restart it after a change in the checkout.
+   18 Nov 2026: Alessio ran it on the real tenant, on build 0.37: the browser
+   sign-in went through, the app got the code on its listener and the demo
+   ran to its end, with the tenant's security defaults on, where the device
+   code is refused (AADSTS530035; the browser sign-in gets the same error
+   from a Microsoft session opened in the browser before the security
+   defaults were on: sign out and in again, or use a private window). Same
+   day on that branch: MesTTo's #14 merged (add-server on `applies_to: []`,
+   declared inputs, the view in done results; for the page of omegahive
+   #403, which the hive has had since it took build 0.38 at 10:37, after
+   that run: MesTTo tried adding a server and signing in from that page on a
+   hive built with it; on this one it is still to try), a sign-in in
+   progress ends with its server or the person's next
+   connect also when it waits for a device code, and the two tests that
+   failed on MesTTo's machine no longer need a `python3` with mcp on the
+   PATH (`sys.executable`), nor pytest to run with SIGINT not ignored (the
+   scripts the tests start get it at its default).
 
 Not a step here: the mind skill for native Omega minds is the flagship team's
 (MesTTo on #2: it covers the actions of every app and takes a request up again

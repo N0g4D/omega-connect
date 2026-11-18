@@ -16,8 +16,9 @@ program contract 0.2 as described in
 HTTP and stdio, and the offline tests pass. 0.2.0 was the first working
 version with the changes from the first review
 ([Changes in 0.2.0](#changes-in-020)); 0.3.0 changes the browser sign-in,
-which the app now finishes by itself on a loopback listener
-([Changes in 0.3.0](#changes-in-030)).
+which the app now finishes by itself on a loopback listener, and declares
+the inputs of `add-server` and `connect` so that a hive page can ask for
+them ([Changes in 0.3.0](#changes-in-030)).
 `hive.programs_check` from a pre-release copy of omegahive (04fc3f2) reports it
 compatible. The contract fixture is not in that copy; the omegahive repository
 opens around 19–20 November. How the hive runs a mind's action is checked
@@ -32,7 +33,8 @@ against `hive/core/program_actions.py` from omegahive main (832b36e).
 | `inspect-tool` | yes | read | One tool's description and full input schema |
 | `read-tool` | yes | read | Runs a tool only if it is classed `read` |
 | `use-tool` | yes | (write) | Runs any visible tool; a mind's call needs a named person's approval ("ask"), on a person's sign-in that person's |
-| `add-server`, `remove-server` | no | confirm | People only |
+| `add-server` | no | confirm | People only. It acts on the app itself (`applies_to: []`), so a page can offer it before any server exists |
+| `remove-server` | no | confirm | People only. The sign-ins in progress on the server end with it |
 | `accept-reads` | no | confirm | Accept the tools a server marks read-only as reads: a whole server, or one tool |
 | `reclass-tool` | no | confirm | Make a tool `write` or `hidden`, or back to `default` (never `read`) |
 | `connect`, `revoke` | no | confirm | OAuth sign-in inside the app (device code, or browser with PKCE and a loopback redirect), for a named person only, and its removal |
@@ -40,6 +42,27 @@ against `hive/core/program_actions.py` from omegahive main (832b36e).
 Parameters for the tool actions: `server`, `tool`, `arguments` (a JSON object,
 or a string holding one). They are also `binding_params`, so an approval binds
 to the exact server, tool and arguments.
+
+**What a hive page can ask for** (MesTTo's #14). `add-server` and `connect`
+declare their inputs in `describe()` as form fields, in the shapes of MCP's
+elicitation forms: a type, a title, and for a choice its values, each with a
+title, and a default. A hive whose app page asks for the inputs an action
+declares before it sends it, and lists the actions on the app itself when
+nothing is selected, can then add the first server and choose how to sign
+in: omegahive #403, which the Mac test build has from 0.38 (PROGRAMS.md,
+section 2, there; #14 calls the change #416). The page leaves a blank field
+out and marks none as required: the app checks what it gets.
+
+`add-server` declares `name`, `url`, `description` and the sign-in;
+`connect` declares `flow`: `device`, the default, or `browser`, which its
+title calls a browser on the hive's machine. A page sends flat values, so
+`add-server` also takes the sign-in as `signin_kind` (`none`, `oauth-device`
+or `bearer-env`) with that kind's own fields: `tenant`, `client_id` and
+`scopes` on one line, separated by spaces, or `variable`. A `signin` object
+sent directly still wins ("Add a server", below). The `done` result of a
+people's action carries the view after the change (`graph`), at the focus
+the page sent, so the page shows the change at once. A `refused` result
+carries no view, and a `stale` one the current view, as before.
 
 A tool is `read` only when the server marks it `readOnlyHint`, **a person has
 accepted it** with `accept-reads`, its definition is **still the one they
@@ -204,22 +227,37 @@ least-privilege scopes, consent by the person who runs `connect`):
 omega-connect adds `openid` and `profile` (so the identity provider says who
 signed in) and `offline_access` (so the token can be renewed) to the scopes.
 
+A hive page that asks for `add-server`'s inputs sends the same sign-in as
+flat fields: `"signin_kind": "oauth-device"` with `tenant`, `client_id` and
+`"scopes": "ChannelMessage.Read.All"`, the scopes on one line; or
+`"signin_kind": "bearer-env"` with `variable` ("Actions", above).
+
 `connect` returns a code and a sign-in address to the person who ran it, and
 only to them: the view never shows the code, so nobody else in the swarm can
-finish that sign-in with their own account. The app finishes the sign-in on
-its own once the person has signed in.
+finish that sign-in with their own account. That holds for the view that
+comes back in the result itself, next to the code. The app finishes the
+sign-in on its own once the person has signed in.
+
+One sign-in is in progress per person and server. A new `connect` of theirs
+on that server, with either flow, takes the place of the earlier one, and
+`remove-server` ends every sign-in in progress on its server: the app stops
+asking Microsoft about a device code, and tokens that still come for a
+sign-in that is over are not kept. So no sign-in arrives later for a server
+that is gone, or for another one added under its name.
 
 Tenants created since July 2026 block the device code while Microsoft's
-security defaults are on. There, run `connect` with `{"flow": "browser"}`
-(authorization code with PKCE, the browser coming back to a loopback
-address: RFC 8252, section 7.3). The app opens a listener on a free port of
-the loopback interface of the hive's machine and uses
-`http://localhost:<port>` as the redirect address. The result gives the
-address to open to the person who ran `connect`, and only to them: the view
-never shows it. They sign in, their browser comes back to the listener with
-a code, and the app trades the code for tokens, with its PKCE verifier and
-the same redirect address, and keeps them under that person. As with the
-device code, the sign-in completes on its own.
+security defaults are on: the sign-in is refused with `AADSTS530035`. There,
+run `connect` with `{"flow": "browser"}` (authorization code with PKCE, the
+browser coming back to a loopback address: RFC 8252, section 7.3), which
+goes through with security defaults on (tried on a real tenant on 18 Nov
+2026). The app opens a listener on a free port of the loopback interface of
+the hive's machine and uses `http://localhost:<port>` as the redirect
+address. The result gives the address to open to the person who ran
+`connect`, and only to them: the view never shows it. They sign in, their
+browser comes back to the listener with a code, and the app trades the code
+for tokens, with its PKCE verifier and the same redirect address, and keeps
+them under that person. As with the device code, the sign-in completes on
+its own.
 
 The listener:
 
@@ -302,8 +340,8 @@ are reviewed by a person").
 
 ## Changes in 0.3.0
 
-One change, not compatible with 0.2.0: **the browser sign-in finishes on a
-loopback listener** (RFC 8252, section 7.3; asked for by MesTTo on #2). In
+The change that is not compatible with 0.2.0: **the browser sign-in finishes
+on a loopback listener** (RFC 8252, section 7.3; asked for by MesTTo on #2). In
 0.2.0 `connect` with `{"flow": "browser"}` answered `needs_input`, and a
 second `connect` took the address the browser landed on, as `redirect_url`.
 On a real tenant there was no such address to give: after the sign-in
@@ -325,9 +363,26 @@ ran 0.2.0:
 - **Every `connect` needs the page the person saw:** from a page that has
   changed it is `stale`, like any other act. 0.2.0 let the second `connect`
   of a browser sign-in through.
-- **Removing a server closes its browser sign-ins in progress.**
 - **`demo.py` and `hive_demo.py`** open the sign-in page and wait for the
   view to name who signed in; no address is pasted back.
+
+Also in 0.3.0:
+
+- **A hive page can ask for the inputs of `add-server` and `connect`**
+  (MesTTo's #14, for a hive with omegahive #403; "Actions", above). Both
+  declare them as form fields, and `add-server` takes the sign-in as flat
+  fields too (`signin_kind` and that kind's own). `add-server` moves from
+  `applies_to: ["server"]` to `[]`: a page that offers an action only on a
+  selected item, as the Mac test build's did before 0.38 (read in 0.33 and
+  0.37), no longer offers it. Such a page sends an action without inputs, so
+  it could not add a server before either.
+- **The `done` result of a people's action carries the view after the
+  change** (`graph`; #14), `connect`'s next to the code or the sign-in
+  address, which the view never shows.
+- **A sign-in in progress ends with its server, or with the person's next
+  `connect` on it**, whichever flow started it. 0.2.0 went on asking Microsoft
+  about a device code after `remove-server`, and kept the token that came,
+  also for another server added under the same name.
 
 ## Changes in 0.2.0
 
@@ -386,11 +441,15 @@ Behaviour that changes for a hive that ran 0.1.0:
 
 ```sh
 pip install -r requirements-dev.txt
-python -m pytest -q tests        # 91 tests, mock MCP servers on localhost, no outside network
+python -m pytest -q tests        # 99 tests, mock MCP servers on localhost, no outside network
 ```
 
 Both suites (this one and `examples/teams-mcp`) pass with MCP SDK 2.3 and
-1.30.
+1.30. They start every Python process with the interpreter that runs them,
+and the scripts that are to get Ctrl-C with SIGINT at its default: so they
+also pass where the `python3` on the PATH has no `mcp`, and when pytest runs
+with SIGINT ignored, as a shell's background job does
+(`sh -c 'trap "" INT; python -m pytest -q examples/teams-mcp'`).
 
 `tests/fakehive.py` is a small stand-in for the host that follows the public
 contract notes and `hive/PROGRAMS.md`, and runs actions as
@@ -425,7 +484,7 @@ Coverage against the brief's definition of done:
 | An identical retry returning the recorded result | `test_identical_retry_returns_the_recorded_result`, `test_app_level_idempotency_also_holds`, `test_a_recovery_answers_from_the_apps_record_or_the_hives` |
 | Tokens never in results, views or logs | `test_tokens_never_appear_in_results_views_traces_or_logs`, `test_device_code_sign_in_and_revoke`, `test_browser_sign_in_finishes_on_a_loopback_listener` |
 | `programs_check` passes | COMPATIBLE with the pre-release copy: `cd ../omegahive-app-contract-04fc3f2 && python -m hive.programs_check ../omega-connect`, and with the checker of the Mac test build 0.33, which loads the app from `HIVE_PLUGIN_DIRS` (17 Nov 2026). It sees only an empty view, so `test_contract.py` checks fuller views and every result with the hive's validators |
-| Live demo: read a Teams channel, then a write a person approves | run on a real tenant with `examples/teams-mcp/demo.py`, in the repository's fake hive (13 Nov 2026: the channel read, a message posted once approved); on a scratch hive still to do, as a named person: `examples/teams-mcp/hive_demo.py` is the script for it on the Mac test build, where it makes the mind's calls with the mind's token (the example's README, *On a scratch hive*). `test_demo.py`, `test_hive_demo.py` and the last test of `test_server.py` rehearse it offline |
+| Live demo: read a Teams channel, then a write a person approves | run on a real tenant with `examples/teams-mcp/demo.py`, in the repository's fake hive (13 Nov 2026: the channel read, a message posted once approved), and on a scratch hive, as a named person, with `examples/teams-mcp/hive_demo.py`, which makes the mind's calls with the mind's token (the example's README, *On a scratch hive*): recorded on 17 Nov 2026 on the Mac test build 0.34, and run again to its end on 18 Nov 2026 on build 0.37 with the browser sign-in of 0.3.0, the tenant's security defaults on. `test_demo.py`, `test_hive_demo.py` and the last test of `test_server.py` rehearse it offline |
 
 Coverage of the first review's changes:
 
@@ -451,7 +510,18 @@ Coverage of issue #8, which person a mind acts for:
 | A mind's write needs the approval of the person whose sign-in it uses; `use-tool` declares `approver: "person"`, so the operator password neither approves nor runs a write | `test_a_minds_write_needs_the_approval_of_the_person_whose_sign_in_it_uses`, `test_describe_matches_the_brief` |
 | `connect` declares `approver: "person"`: the operator password starts no sign-in (403 `person_required`) | `test_only_a_named_person_signs_in`, `test_describe_matches_the_brief` |
 
-Coverage of the browser sign-in on a loopback listener (0.3.0):
+Coverage of what a hive page can ask for (#14, 0.3.0):
+
+| Behaviour | Tests |
+|---|---|
+| `add-server` on `applies_to: []`; its inputs and `connect`'s `flow` declared as form fields | `test_a_hive_page_can_ask_for_add_server_and_connect_inputs` |
+| The browser choice of `flow` names the hive's machine, where the listener is | `test_the_browser_choice_of_connect_names_the_hives_machine` |
+| The sign-in as a page's flat fields stores the same server as the `signin` object, which still wins | `test_add_server_takes_the_sign_in_as_a_pages_flat_fields` |
+| A change returns the view after it, at the focus the page sent; a refused one returns none; a focus that is no item leaves the change done | `test_a_change_from_the_page_returns_the_view_after_it`, `test_a_focus_that_is_no_item_leaves_the_change_done` |
+| `connect`'s result carries the code, or the sign-in address, next to that view and never in it | `test_device_code_sign_in_and_revoke`, `test_browser_sign_in_finishes_on_a_loopback_listener` |
+
+Coverage of the browser sign-in on a loopback listener, and of how a sign-in
+in progress ends (0.3.0):
 
 | Behaviour | Tests |
 |---|---|
@@ -460,8 +530,8 @@ Coverage of the browser sign-in on a loopback listener (0.3.0):
 | A connection that sends nothing, or half a request, holds up no sign-in | `test_a_connection_that_sends_no_request_holds_up_no_sign_in` |
 | An error from Microsoft, in the redirect or when the code is traded: in the trace, a fixed page that repeats none of it, the listener closed | `test_a_browser_sign_in_that_ends_with_an_error_is_traced_and_closed` |
 | A sign-in nobody finishes expires: the listener closes, the view stops showing it, the trace says so | `test_a_browser_sign_in_nobody_finishes_expires` |
-| A new `connect` by the same person on the same server closes the earlier listener, with either flow; a stale one closes nothing; another person's sign-in goes on and is kept under them | `test_a_new_connect_closes_the_persons_earlier_browser_sign_in`, `test_a_device_code_connect_closes_the_persons_browser_sign_in_too` |
-| Removing a server closes its browser sign-ins; one that is finishing just then is not kept | `test_removing_a_server_closes_its_browser_sign_ins`, `test_a_sign_in_whose_server_is_removed_while_it_finishes_is_not_kept` |
+| A new `connect` by the same person on the same server closes the earlier listener, with either flow, and ends the earlier wait for a device code: one sign-in is kept and traced; a stale one closes nothing; another person's sign-in goes on and is kept under them | `test_a_new_connect_closes_the_persons_earlier_browser_sign_in`, `test_a_device_code_connect_closes_the_persons_browser_sign_in_too`, `test_a_new_connect_closes_the_persons_earlier_device_code_sign_in` |
+| Removing a server ends its sign-ins in progress, the listener of a browser one and the wait for a device code; tokens that are on their way just then are not kept, nor do they reach another server added under its name | `test_removing_a_server_closes_its_browser_sign_ins`, `test_removing_a_server_closes_its_device_code_sign_ins`, `test_a_sign_in_whose_server_is_removed_while_it_finishes_is_not_kept`, `test_a_device_code_sign_in_whose_server_is_removed_while_it_finishes_is_not_kept` |
 | The listener gives up past its limit of requests | `test_the_listener_gives_up_after_too_many_requests` |
 | Loopback only: `127.0.0.1` and, where the machine has it, `::1` on the same port; never a port that another program holds on `::1` | `test_the_listener_is_on_the_loopback_interface_only`, `test_the_listener_takes_no_port_held_on_the_other_loopback_address` |
 
@@ -489,10 +559,14 @@ settled points 4 and 6 on issue #1.
    anything else keeps the ordinary contract, which is what a write needs.
    `USE_TOOL_EFFECT` in `program.py` stays `None`. The review confirmed this
    reading of the contract.
-2. **Settled: `applies_to` for actions that do not target an item**
-   (`list-servers`, `add-server`) stays `["server"]`. The contract shows
-   `applies_to` only as a list of kinds and says nothing about actions without
-   an item; the review found this choice fine.
+2. **Settled: `applies_to` for actions that do not target an item.**
+   `list-servers` keeps `["server"]`: the contract of 04fc3f2 shows
+   `applies_to` only as a list of kinds and says nothing about actions
+   without an item, and the review found that choice fine. `add-server` is
+   `[]` since 0.3.0 (MesTTo's #14): PROGRAMS.md, section 2, now gives the
+   empty list that meaning, an action on the app itself, which takes no item
+   and which the page lists when nothing is selected (omegahive #403; read
+   in the Mac test build 0.38, the first to have it).
 3. **Verified: `act()` is told who approved.** PROGRAMS.md does not say so;
    `hive/core/program_actions.py` (832b36e) does. On the minds' route under
    "ask", the hive answers `approval_required` with an `approval_id`; when the

@@ -97,7 +97,8 @@ person (omegahive #332), it uses a sign-in only while one person alone is
 signed in to the swarm's servers, so do the demo in a swarm where nobody else
 has signed in to a server.
 
-On a tenant whose security defaults block the device code, run connect with
+On a tenant whose security defaults block the device code (the sign-in is
+then refused with `AADSTS530035`), run connect with
 `{"flow": "browser"}` instead. Open the address in the result in a browser on
 the hive's machine, sign in and accept. The browser then goes to
 `http://localhost:<port>`, where the app listens for it, and says "You are
@@ -211,12 +212,16 @@ again.
 
 ## On a scratch hive (Mac test build)
 
-`hive_demo.py` runs the demo on a real hive: the one the Mac test build (0.33
-here) installs in `~/OmegaHive`, where you enter as its owner, a named person.
-On this build a mind cannot call an app's actions by itself yet, so the script
-makes the mind's calls in its place, with the mind's own token. The person's
-steps are yours: on the hive's pages where a page can do them, otherwise from
-the script, with your sign-in, after a yes at the terminal.
+`hive_demo.py` runs the demo on a real hive: the one the Mac test build
+installs in `~/OmegaHive`, where you enter as its owner, a named person. The
+app was mounted and checked there on build 0.33, and what follows about the
+hive's routes and pages was read in that build. The demo recorded on 17 Nov
+2026 ran on build 0.34; on 18 Nov 2026 it ran on build 0.37 with the browser
+sign-in, Microsoft's security defaults on. Both runs were on a real tenant.
+As read on 0.33, a mind cannot call an app's actions by itself yet, so the
+script makes the mind's calls in its place, with the mind's own token. The
+person's steps are yours: on the hive's pages where a page can do them,
+otherwise from the script, with your sign-in, after a yes at the terminal.
 
 **Mount the app**, from a checkout of this repository:
 
@@ -254,6 +259,18 @@ cd ~/OmegaHive/app && ~/OmegaHive/venv/bin/python -m hive.programs_check /path/t
 | use-tool | the mind | the script, same route. The hive answers `{"status": "approval_required", "approval_id": ...}` |
 | approval | you | the hive's Approvals page: *Approve*, or *No* |
 | use-tool, again | the mind | the script: the same body with the `approval_id` |
+
+That table is the page of the builds the demo ran on: up to 0.37 it offers
+an action only on a selected item and sends it without inputs, hence the
+script for add-server and connect. From build 0.38 the page asks for the
+inputs an action declares, and lists the actions on the app itself under *In
+this app* when nothing is selected (omegahive #403). There add-server and
+connect can be done on the page, since both declare their inputs (the main
+README, "Actions"): *Add a server* with nothing selected, then *Sign in to
+this server* on the server, where the *browser* choice is this same sign-in,
+in a browser on the hive's machine. That is still to try on this hive. The
+script sends these two steps itself, whichever page the hive has; on 0.38 it
+has not been run yet (the routes it uses are all there).
 
 A person's act that declares `confirm` needs the host's confirm first:
 `POST /api/programs/omega-connect/confirm` with `{"swarm_id", "action",
@@ -305,7 +322,7 @@ With `--device-code`, step 3 is connect without a flow: the script shows the
 address and the user code of the device code, which are for you, and goes on
 by itself once you have entered the code and signed in. The browser sign-in
 is the default: it is the one that works on a tenant whose security defaults
-block the device code.
+block the device code (`AADSTS530035`), as it did on 18 Nov 2026.
 
 At steps 4 and 6 the answer **2** makes the script send your accept-reads or
 your approval itself. The steps on the hive's pages are described from the
@@ -353,7 +370,8 @@ only to the stand-in's memory.
 | demo.py: `teams-mcp did not start` | `mcp` or `uvicorn` missing (`pip install -r requirements-dev.txt`); the demo prints the server's log |
 | demo.py: `The code expired before anyone signed in`, or `Sign-in failed` naming an expired code | the code lasts about 15 minutes: run the demo again |
 | demo.py: `Sign-in failed` | the sign-in was cancelled or the permissions declined; the identity platform's own text follows |
-| demo.py: the device code sign-in fails on a tenant created since July 2026 | its security defaults block the device code: run the demo again and choose **2**, the browser |
+| device code: `AADSTS530035` (*Access has been blocked by security defaults*) | the tenant's security defaults block the device code, as on every tenant created since July 2026: sign in with the browser. demo.py: run it again and choose **2**; hive_demo.py: run it without `--device-code` |
+| browser sign-in: `AADSTS530035` in the browser | the browser's Microsoft session was opened before the tenant's security defaults were on. Sign out of Microsoft and in again, or use a private window; with the security defaults on, the browser sign-in then goes through |
 | browser sign-in: `AADSTS50011` in the browser | the redirect URI `http://localhost` is missing under *Mobile and desktop applications* (*Before the demo*, step 2); the port in the address does not matter |
 | browser sign-in: after the sign-in the browser cannot open `localhost:<port>` | the browser is not on the hive's machine, where the app listens (on a hive shared over a network this sign-in does not work yet: use the device code). Or the app no longer waits: ten minutes have passed, a newer connect of yours replaced the sign-in, or the hive was restarted. Run connect again |
 | browser sign-in: the page says *The sign-in did not complete* | the sign-in was cancelled or the permissions declined, or Microsoft refused the code. demo.py prints the reason; on a hive it is the `reason` of the last `connect` line in the app's trace (`trace.jsonl` in the swarm's folder under `~/.omega-connect`). `AADSTS7000218` there: `http://localhost` is registered under *Web*, not under *Mobile and desktop applications* |
@@ -370,7 +388,7 @@ only to the stand-in's memory.
 ## Tests
 
 ```sh
-python -m pytest -q examples/teams-mcp      # 53 tests, ~60 s
+python -m pytest -q examples/teams-mcp      # 54 tests, ~60 s
 ```
 
 Graph is simulated in memory (`FakeGraph` replaces `server.graph_send`), so no
@@ -402,8 +420,11 @@ the demo; that the
 demo uses its own store and key and passes none of the shell's
 `OMEGA_CONNECT_` settings to the server; that a failed sign-in, Ctrl-C or a
 closed input stop the demo, with the server stopped and the temporary folder
-deleted; and that no source file of the example holds an invisible control or
-bidirectional character.
+deleted; that Ctrl-C reaches a script also when pytest itself runs with
+SIGINT ignored, as a shell's background job does (the tests of both demos
+start their scripts with SIGINT at its default); and that no `.py` file of
+the whole repository, nor any of its documents (`.md`, `.json`, `.txt`),
+holds an invisible control or bidirectional character.
 
 `terminal_input.py` is what the two demos ask at the terminal with.
 
