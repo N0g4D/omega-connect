@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -768,7 +769,8 @@ def test_no_rule_means_deny(program, demo_url):
 
 
 def test_stdio_is_off_by_default(hive, monkeypatch):
-    params = {"name": "local", "transport": "stdio", "command": "python3", "args": [str(DEMO)]}
+    # the interpreter that runs the tests, which has mcp: a python3 found on the PATH may not
+    params = {"name": "local", "transport": "stdio", "command": sys.executable, "args": [str(DEMO)]}
     refused = run(hive.person_act("s1", PERSON, "add-server", [], params, confirmed=True))
     assert refused["status"] == "refused" and "OMEGA_CONNECT_ALLOW_STDIO" in refused["message"]
     monkeypatch.setenv("OMEGA_CONNECT_ALLOW_STDIO", "1")

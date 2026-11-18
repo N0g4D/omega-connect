@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]  # the repository
 DEMO = HERE / "demo.py"
 
 
@@ -167,12 +168,19 @@ sys.exit(demo.main())
 """
 
 
+# Starts the command that follows it with SIGINT at its default, in the same process. A process inherits a
+# signal that its parent ignores, and pytest runs with SIGINT ignored whenever a shell starts it as a background
+# job: without this a script would never get the Ctrl-C that Run sends.
+DEFAULT_SIGINT = ("import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+                  "os.execv(sys.argv[1], sys.argv[1:])")
+
+
 class Run:
     """A script in its own process, answered line by line as a person at the terminal would."""
 
     def __init__(self, argv: list[str], env: dict, cwd: Path):
-        self.proc = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen([sys.executable, "-c", DEFAULT_SIGINT, *argv], env=env, cwd=cwd,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self._out = b""
         self._seen = 0
         self._reader = threading.Thread(target=self._read, daemon=True)
@@ -431,6 +439,26 @@ def test_ctrl_c_stops_the_server_and_deletes_the_store(start, platform):
     assert run.leftovers() == []
 
 
+def test_ctrl_c_reaches_a_script_also_when_pytest_runs_with_it_ignored(tmp_path):
+    """A shell starts a background job with SIGINT ignored, and a process hands an ignored signal on to the ones
+    it starts. A script started like that would never get the Ctrl-C these tests send: Python does not even
+    raise KeyboardInterrupt for a signal it found ignored. So Run starts each script with SIGINT at its default,
+    as a terminal does."""
+    waits = ("import time\ntry:\n    print('ready', flush=True)\n    time.sleep(60)\n"
+             "except KeyboardInterrupt:\n    print('interrupted', flush=True)\n")
+    before = signal.signal(signal.SIGINT, signal.SIG_IGN)  # as pytest finds it in a background job
+    try:
+        run = Run([sys.executable, "-c", waits], dict(os.environ), tmp_path)
+    finally:
+        signal.signal(signal.SIGINT, before)
+    try:
+        run.expect("ready")
+        run.proc.send_signal(signal.SIGINT)
+        assert run.finish(timeout=10) == 0 and "interrupted" in run.output
+    finally:
+        run.stop()
+
+
 def test_closing_the_input_stops_the_demo(start):
     run = start(TENANT)  # the input ends before the client ID
     assert run.finish() == 1
@@ -438,12 +466,28 @@ def test_closing_the_input_stops_the_demo(start):
     assert run.server() is None and run.leftovers() == []
 
 
+def python_sources() -> list[Path]:
+    """Every .py file of the repository: the app, its tests and this example. Hidden folders (.git, .venv) and
+    virtual environments are not the repository's."""
+    found = []
+    for folder, subfolders, files in os.walk(ROOT):
+        subfolders[:] = sorted(name for name in subfolders if not name.startswith(".") and name != "__pycache__"
+                               and not Path(folder, name, "pyvenv.cfg").exists())
+        found += [Path(folder, name) for name in sorted(files) if name.endswith(".py")]
+    return found
+
+
 def test_the_sources_hold_no_invisible_characters():
-    """A control or bidirectional character belongs in a source file as an escape, where it can be seen."""
-    for source in sorted(HERE.glob("*.py")):
+    """A control or bidirectional character belongs in a source file as an escape, where it can be seen: a
+    literal one can make the code read differently from what runs. Every .py file of the repository is looked
+    at. A tab and a carriage return are controls too: the sources hold neither."""
+    sources = python_sources()
+    assert {ROOT / "program.py", ROOT / "connect" / "oauth.py", ROOT / "tests" / "test_app.py",
+            ROOT / "tests" / "fixtures" / "demo_server.py", HERE / "terminal_input.py"} <= set(sources)
+    for source in sources:
         hidden = {f"U+{ord(char):04X}" for char in source.read_text(encoding="utf-8")
-                  if unicodedata.category(char) in ("Cc", "Cf") and char != "\n"}
-        assert not hidden, f"{source.name}: {sorted(hidden)}"
+                  if unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp") and char != "\n"}
+        assert not hidden, f"{source.relative_to(ROOT)}: {sorted(hidden)}"
 
 
 if __name__ == "__main__":  # demo.py starts this file in place of server.py (see RUNNER)
