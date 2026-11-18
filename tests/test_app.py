@@ -1338,6 +1338,21 @@ def test_browser_sign_in_finishes_on_a_loopback_listener(hive, guarded_url, fake
     assert {key for key, value in started.items() if query["state"] in json.dumps(value)} == {"message", "detail"}
 
 
+def test_the_browser_sign_ins_message_says_what_to_do_before_the_address(hive, guarded_url, fake_authority):
+    """A hive page shows a result's message in a notice too, which cuts a long address short. So connect's message
+    for the browser sign-in says first what to do, where and within how long, and ends with the address. The
+    address stays in the message, the one field the contract promises to show the person, and in the detail."""
+    assert add(hive, "s1", "m365", guarded_url, signin=SIGNIN)["status"] == "done"
+    started, _ = browser_sign_in(hive, "s1", "m365")
+    address, message = started["detail"]["authorization_url"], started["message"]
+    assert message.endswith(address) and message.count(address) == 1
+    before_it = message[:-len(address)]
+    minutes = hive.program.oauth_mod.BROWSER_SIGNIN_SECONDS // 60
+    for said in ("in a browser on the hive's machine", "sign in", f"within {minutes} minutes", "completes on its own"):
+        assert said in before_it, said
+    assert "://" not in before_it   # no address, in part or whole, among the words
+
+
 def test_only_the_redirect_with_its_state_completes_a_browser_sign_in(hive, guarded_url, fake_authority):
     """The listener completes on a GET that carries the sign-in's state, and on nothing else. A browser asking
     for an icon, a wrong state, a missing or repeated one, another path or another method, bytes that are no

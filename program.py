@@ -1277,9 +1277,11 @@ def _browser_signin(swarm, store, record, person, actor):
     # the address that could bring a browser to it.
     listener.start(signin.state, landed, ended, oauth_mod.BROWSER_SIGNIN_SECONDS)
     _signin_started(key, pending)
-    return _result("done", f"Open {signin.url} in a browser on the hive's machine and sign in, within "
+    # What to do comes first and the address last: a hive page also shows the message in a notice, which cuts a
+    # long address short. The address stays in the message, the one field the contract promises to show the person.
+    return _result("done", "Open the sign-in address in a browser on the hive's machine and sign in, within "
                            f"{oauth_mod.BROWSER_SIGNIN_SECONDS // 60} minutes. The connection completes on its own "
-                           "once you have.",
+                           f"once you have. The address: {signin.url}",
                    detail={"authorization_url": signin.url, "redirect_uri": signin.redirect_uri,
                            "expires_in": oauth_mod.BROWSER_SIGNIN_SECONDS})
 
