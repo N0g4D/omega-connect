@@ -34,9 +34,15 @@ def program():
 
 @pytest.fixture(autouse=True)
 def fresh_sessions(program):
-    """Each test starts with no MCP sessions, as its store starts empty."""
+    """Each test starts with no MCP sessions, as its store starts empty, and with no sign-in waiting."""
     yield
     program.ENGINE.shutdown()
+    with program._SIGNIN_LOCK:
+        left = list(program._PENDING_SIGNINS.values())
+        program._PENDING_SIGNINS.clear()
+    for pending in left:
+        if pending.get("listener"):
+            pending["listener"].close()  # a browser sign-in the test left waiting
 
 
 @pytest.fixture(autouse=True)
@@ -130,7 +136,7 @@ SECRET = "tok-9f2c4b7e51d0a8"
 NEW_TOKEN = "tok-3e8a1c6f92b47d"  # what a refresh returns when a test asks for a new token
 REFRESH = "rt-55aa66bb"  # the first refresh token; the ones that follow start with it too
 ACCOUNT = "ada@contoso.example"
-AUTH_CODE = "ac-5d1e8b2f9a"  # what the browser sign-in's redirect address carries
+AUTH_CODE = "ac-5d1e8b2f9a"  # what the browser brings back to the app after a browser sign-in
 
 
 @pytest.fixture
@@ -231,11 +237,13 @@ class _Authority:
 
     def authorize(self, address: str, code: str = AUTH_CODE) -> str:
         """The person signs in at the authorization address and consents: the identity platform issues
-        a code for its challenge, and the browser lands on the redirect address with that code."""
+        a code for its challenge and sends the browser back to the redirect address with that code.
+        Returns where the browser goes. As Entra does for a redirect address without a path, a slash
+        comes before the query."""
         query = {k: v[0] for k, v in parse_qs(urlsplit(address).query).items()}
         with self.lock:
             self.codes[code] = (query["code_challenge"], query["redirect_uri"])
-        return f"{query['redirect_uri']}?code={code}&state={query['state']}&session_state=s-1"
+        return f"{query['redirect_uri']}/?code={code}&state={query['state']}&session_state=s-1"
 
     def grant(self, access_token: str) -> dict:
         with self.lock:

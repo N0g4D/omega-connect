@@ -29,6 +29,10 @@ What the app guarantees on its side
   read at call time and go only to the addresses the operator lists for them;
   OAuth tokens are encrypted at rest. Neither appears in results, views,
   traces, logs or errors.
+- A browser sign-in is finished on a listener of the app, on the loopback
+  interface only and for that sign-in alone. Only the request that carries
+  the sign-in's state completes it, and nothing of a request to it is logged
+  or sent back.
 - Tool output is returned as data, capped in size, and labelled untrusted.
 - A write is sent again only when it certainly did not run (a refused
   connection, a session that ended before the call went out, a 404 for a
@@ -37,6 +41,10 @@ What the app guarantees on its side
   is unknown and does not send it again.
 - Every call is traced with server, tool, digests of arguments and result,
   status, actor, who approved it and the hive's record id for the act.
+- What a person does comes back with the view after it, so their page shows
+  it at once. An answer to a mind never carries a view: the view shows what
+  a mind is not told, the tools the owner hid, who signed in and the recent
+  calls.
 - Streamable HTTP by default. stdio servers (which start processes on the
   hive's machine) are refused unless OMEGA_CONNECT_ALLOW_STDIO=1.
 - Everything is scoped to the calling swarm.
@@ -87,10 +95,28 @@ ACCEPTED, CHANGED, UNREVIEWED = "accepted", "changed since review", "not reviewe
 # Added to every oauth-device sign-in: openid and profile bring an id_token naming who signed in,
 # offline_access a refresh token.
 IDENTITY_SCOPES = ("openid", "profile", "offline_access")
+# What add-server asks a person for on a hive page, as form fields (hive/PROGRAMS.md §2). A page sends flat values, so
+# the sign-in comes as signin_kind with its own fields; a direct call may still send the signin object instead.
+ADD_SERVER_INPUTS = {
+    "name": {"type": "string", "title": "Name", "description": "lowercase letters, digits, - or _, up to 41"},
+    "url": {"type": "string", "title": "Address", "description": "https://, or http:// only for a server on this machine"},
+    "description": {"type": "string", "title": "What it's for"},
+    "signin_kind": {"type": "string", "title": "Sign-in", "default": "none",
+                    "oneOf": [{"const": "none", "title": "None"},
+                              {"const": "oauth-device", "title": "Microsoft sign-in, by each person"},
+                              {"const": "bearer-env", "title": "A token from the hive's environment"}]},
+    "tenant": {"type": "string", "title": "Directory (tenant) ID", "description": "for Microsoft sign-in"},
+    "client_id": {"type": "string", "title": "Application (client) ID", "description": "for Microsoft sign-in"},
+    "scopes": {"type": "string", "title": "Scopes", "description": "for Microsoft sign-in, separated by spaces, least privilege first"},
+    "variable": {"type": "string", "title": "Token variable", "description": "for a token from the environment: OMEGA_CONNECT_CRED_<NAME>"},
+}
 # The host refuses a view with more items than this (hive/core/programs.py, MAX_ITEMS).
 MAX_ITEMS_IN_VIEW = 400
 MAX_CALLS_IN_VIEW = 30
-# (swarm, server, principal) -> a sign-in that person started; never its code
+# (swarm, server, principal) -> the sign-in that person has in progress; never its code. A browser
+# sign-in also keeps its listener here. A later connect of theirs, or the removal of the server, takes
+# the entry away: the listener closes, the wait for a device code ends, and tokens that still come for
+# that sign-in are not kept (_keep_signin).
 _PENDING_SIGNINS: dict[tuple[str, str, str], dict] = {}
 _SIGNIN_LOCK = threading.Lock()
 # one token renewal at a time per (swarm, server, principal)
@@ -139,16 +165,30 @@ def describe():
             {"id": "read-tool", "label": "Run a read-only tool", "applies_to": ["tool"],
              "binding_params": ["server", "tool", "arguments"], **agent_read},
             use_tool,
-            {"id": "add-server", "label": "Add a server", "applies_to": ["server"], "confirm": True},
+            # applies_to []: it acts on the app itself, so a page offers it before any server exists; its inputs are
+            # form fields a page asks for first (hive/PROGRAMS.md §2, MCP's elicitation form shapes)
+            {"id": "add-server", "label": "Add a server", "applies_to": [], "confirm": True, "params": ADD_SERVER_INPUTS},
             {"id": "remove-server", "label": "Remove server", "applies_to": ["server"], "confirm": True},
             {"id": "accept-reads", "label": "Accept read-only tools (whole server or one tool)",
              "applies_to": ["server", "tool"], "confirm": True},
+            # Its one input is a choice a page asks for first. No default: the page's select starts on no choice, a
+            # person picks one, and a field left blank is not sent, which _reclass_tool refuses. No "read" among
+            # the choices: only accept-reads makes a tool read.
             {"id": "reclass-tool", "label": "Reclass tool (write, hidden or default)", "applies_to": ["tool"],
-             "confirm": True},
+             "confirm": True, "params": {"class": {
+                 "type": "string", "title": "Treat it as",
+                 "oneOf": [{"const": WRITE, "title": "Write, a person approves each call"},
+                           {"const": HIDDEN, "title": "Hidden, minds don't see it and nobody can run it"},
+                           {"const": "default",
+                            "title": "Back to default, write unless a person accepted it as read"}]}}},
             # approver "person" here too: a sign-in always belongs to a named person, so the hive refuses
-            # connect to the local operator password (403 person_required).
+            # connect to the local operator password (403 person_required). The browser flow comes back to a
+            # listener of the app on the hive's machine (_browser_signin), so its choice says where the browser is.
             {"id": "connect", "label": "Sign in to this server", "applies_to": ["server"], "confirm": True,
-             "approver": "person"},
+             "approver": "person", "params": {"flow": {
+                 "type": "string", "title": "How to sign in", "default": "device",
+                 "oneOf": [{"const": "device", "title": "A code to enter on another device"},
+                           {"const": "browser", "title": "Sign in in a browser on the hive's machine"}]}}},
             {"id": "revoke", "label": "Revoke sign-in", "applies_to": ["server"], "confirm": True},
         ],
     }
@@ -664,7 +704,7 @@ def view(ctx, focus, stage):
     graph = {
         "revision": _revision(swarm, store),
         "title": "Tool connections",
-        "focus": focus if focus in ids else None,
+        "focus": focus if isinstance(focus, str) and focus in ids else None,
         "items": items,
         "links": links,
         "groups": groups,
@@ -698,6 +738,24 @@ def view(ctx, focus, stage):
 
 async def act(ctx, action, items, params):
     params = dict(params or {})
+    result = await _act(ctx, action, items, params)
+    # One rule for the view, whatever the action: a person called and the result is done, so it carries the view
+    # after the act, at the step the person was on (the host sends focus and stage with every act). A hive page keeps
+    # the view it has unless a done result brings one (PROGRAMS.md §3), and sends that view's revision with its next
+    # act: without one the page kept "No servers yet" after add-server and showed no tool after list-tools, whose
+    # first accept-reads then came back stale. Never to a mind: the view shows the tools the owner hid, who signed
+    # in and the recent calls. It is added here, last, to the answer alone, so no record of the act holds it.
+    if result.get("status") == "done" and "graph" not in result and _actor_kind(ctx) == "person":
+        try:
+            result = {**result, "graph": view(ctx, params.get("focus"), params.get("stage") or "unfold")}
+        except Exception as exc:
+            # The act stays done, without a view: a change that was made, or a call that went out, is no error
+            # because the view could not be made. The type only: an exception's text can carry anything.
+            logger.error("omega-connect: the view after %s failed with %s", action, type(exc).__name__)
+    return result
+
+
+async def _act(ctx, action, items, params):
     swarm = _swarm(ctx)
     store = store_mod.SwarmStore(swarm)
     try:
@@ -711,10 +769,7 @@ async def act(ctx, action, items, params):
             return await _call_tool(ctx, swarm, store, action, items, params)
         if action in ("add-server", "remove-server", "accept-reads", "reclass-tool", "connect", "revoke"):
             base = params.get("base_revision")
-            # Finishing one's own browser sign-in decides nothing from the page, and the connect that
-            # started it changed the page (a sign-in in progress), so its base is always an old one.
-            finishing = action == "connect" and params.get("redirect_url") is not None
-            if base is not None and base != _revision(swarm, store) and not finishing:
+            if base is not None and base != _revision(swarm, store):
                 return _result("stale", "the page changed; look again before changing servers",
                                graph=view(ctx, None, "unfold"))
             handler = {"add-server": _add_server, "remove-server": _remove_server, "accept-reads": _accept_reads,
@@ -960,6 +1015,18 @@ async def _run_tool(ctx, swarm, store, action, record, tool, arguments, trace, s
 _URL_SECRET = re.compile(r"(token|key|secret|password|sig|code)=", re.I)
 
 
+def _flat_signin(params):
+    """The sign-in a hive page sends as flat fields (ADD_SERVER_INPUTS): signin_kind and the fields that kind takes,
+    left out when blank. Scopes come as one line separated by spaces, as OAuth writes them (RFC 6749, section 3.3)."""
+    kind = str(params.get("signin_kind") or "none")
+    takes = {"oauth-device": ("tenant", "client_id"), "bearer-env": ("variable",)}.get(kind, ())
+    auth = {"kind": kind, **{key: params[key] for key in takes if key in params}}
+    if kind == "oauth-device":
+        scopes = params.get("scopes", "")
+        auth["scopes"] = scopes.split() if isinstance(scopes, str) else scopes
+    return auth
+
+
 def _add_server(ctx, swarm, store, items, params):
     name = str(params.get("name", "")).strip().lower()
     if not store_mod.SERVER_NAME.match(name):
@@ -1004,7 +1071,7 @@ def _add_server(ctx, swarm, store, items, params):
             except (TypeError, ValueError):
                 return _refused(f"{key} is a whole number of seconds, 1 to 600")
     # "signin" rather than "auth": the host refuses bodies with credential-like keys.
-    auth = params.get("signin") or {"kind": "none"}
+    auth = params.get("signin") or _flat_signin(params)
     if not isinstance(auth, dict):
         return _refused('signin is an object such as {"kind": "none"}')
     kind = auth.get("kind", "none")
@@ -1042,6 +1109,12 @@ def _add_server(ctx, swarm, store, items, params):
 
 def _remove_server(ctx, swarm, store, items, params):
     record, _ = _target(store, items, params, need_tool=False)
+    with _SIGNIN_LOCK:  # a sign-in in progress ends with its server: no token comes for it later
+        waiting = [key for key in _PENDING_SIGNINS if key[:2] == (swarm, record["name"])]
+        closed = [_PENDING_SIGNINS.pop(key) for key in waiting]
+    for pending in closed:
+        if pending.get("listener"):  # a browser sign-in; the wait for a device code sees that it is over
+            pending["listener"].close()
     ENGINE.forget(swarm, record["name"])
     store.remove_server(record["name"])
     store.trace({"action": "remove-server", "server": record["name"], "tool": None,
@@ -1098,54 +1171,30 @@ async def _connect(ctx, swarm, store, items, params):
     store_mod._fernet()  # fail now, not after the person signs in, if tokens cannot be stored
     person, actor = _principal(ctx), _actor(ctx)  # whose sign-in it is; who the trace names
     key = (swarm, record["name"], person)
-    if params.get("redirect_url") is not None:
-        return await _finish_browser_signin(swarm, store, record, person, actor, str(params["redirect_url"]))
     flow = params.get("flow", "device")
     if flow == "browser":
-        signin = oauth_mod.start_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"])
-        pending = {"by": person, "browser": signin}  # the address goes only to this person
-        with _SIGNIN_LOCK:
-            _PENDING_SIGNINS[key] = pending
-
-        def expire():  # as the device code's thread does when its code expires
-            with _SIGNIN_LOCK:
-                if _PENDING_SIGNINS.get(key) is pending:  # not a later connect's
-                    _PENDING_SIGNINS.pop(key)
-
-        timer = threading.Timer(max(signin.expires_at - time.time(), 0), expire)
-        timer.daemon = True
-        timer.start()
-        return _result("needs_input",
-                       f"Open {signin.url} and sign in. Your browser then lands on an address starting with "
-                       f"{signin.redirect_uri} (the page stays empty). Run connect again with that whole address "
-                       f"as redirect_url, within {oauth_mod.BROWSER_SIGNIN_SECONDS // 60} minutes.",
-                       needs={"redirect_url": "the whole address your browser lands on after you sign in"},
-                       detail={"authorization_url": signin.url, "redirect_uri": signin.redirect_uri,
-                               "expires_in": oauth_mod.BROWSER_SIGNIN_SECONDS})
+        return _browser_signin(swarm, store, record, person, actor)
     if flow != "device":
-        return _refused("flow must be device (a code to enter) or browser (an address to paste back)")
+        return _refused("flow must be device (a code to enter) or browser (an address to open in a browser on "
+                        "the hive's machine)")
     code = oauth_mod.start_device_flow(auth["tenant"], auth["client_id"], auth["scopes"])
     pending = {"by": person}  # the code goes only to this person, in the result below
-    with _SIGNIN_LOCK:
-        _PENDING_SIGNINS[key] = pending
+    _signin_started(key, pending)
 
     def wait():
         try:
-            token = oauth_mod.poll_device_flow(auth["tenant"], auth["client_id"], code)
-            token["person"] = person
-            # Close the old session before the new token is visible, so a call made
-            # with the new token never lands on a session that is being closed.
-            ENGINE.forget(swarm, record["name"])
-            store.put_credentials(record["name"], person, token)
+            token = oauth_mod.poll_device_flow(auth["tenant"], auth["client_id"], code,
+                                               wanted=lambda: _signin_in_progress(key, pending))
+            if token is None:  # closed while it waited, by a later connect of theirs or with its server
+                return
+            _keep_signin(key, pending, store, token)
             store.trace({"action": "connect", "server": record["name"], "tool": None,
                          "actor": actor, "status": "done"})
         except Exception as exc:
             store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor,
                          "status": "error", "reason": getattr(exc, "message", exc.__class__.__name__)[:200]})
         finally:
-            with _SIGNIN_LOCK:
-                if _PENDING_SIGNINS.get(key) is pending:  # not a later connect's
-                    _PENDING_SIGNINS.pop(key)
+            _signin_over(key, pending)
 
     threading.Thread(target=wait, name=f"omega-connect-signin-{record['name']}", daemon=True).start()
     return _result("done", f"Open {code.verification_uri} and enter the code {code.user_code} to sign in. "
@@ -1154,39 +1203,103 @@ async def _connect(ctx, swarm, store, items, params):
                            "expires_in": int(code.expires_at - time.time())})
 
 
-async def _finish_browser_signin(swarm, store, record, person, actor, landed):
-    """The person pastes the address their browser landed on. A wrong or failed paste leaves the sign-in
-    open until it expires, so they can sign in again from the same address and paste the new one."""
-    key = (swarm, record["name"], person)
+def _signin_started(key: tuple[str, str, str], pending: dict) -> None:
+    """A person's sign-in to a server becomes the one in progress, and an earlier one of theirs is
+    over: the listener of a browser sign-in closes, so its address completes nothing from here on,
+    and the wait for a device code stops asking (_signin_in_progress)."""
     with _SIGNIN_LOCK:
-        pending = _PENDING_SIGNINS.get(key)
-    signin = (pending or {}).get("browser")
-    if signin is None or pending["by"] != person:
-        return _refused("no browser sign-in of yours is waiting for this server; run connect with flow browser first")
-    if time.time() > signin.expires_at:
-        with _SIGNIN_LOCK:
-            if _PENDING_SIGNINS.get(key) is pending:
-                _PENDING_SIGNINS.pop(key)
-        return _refused("that sign-in expired; run connect with flow browser again")
-    auth = record["auth"]
-    # The identity provider is called in a thread, so the hive's event loop keeps running.
-    try:
-        token = await asyncio.to_thread(oauth_mod.finish_browser_flow, auth["tenant"], auth["client_id"],
-                                        auth["scopes"], signin, landed)
-    except oauth_mod.OAuthError as exc:
-        store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor,
-                     "status": "error", "reason": exc.message[:200]})
-        raise
-    token["person"] = person
-    # As for the device code: close the old session before the new token is visible.
-    ENGINE.forget(swarm, record["name"])
-    store.put_credentials(record["name"], person, token)
+        earlier = _PENDING_SIGNINS.get(key)
+        _PENDING_SIGNINS[key] = pending
+    if earlier and earlier.get("listener"):
+        earlier["listener"].close()
+
+
+def _signin_in_progress(key: tuple[str, str, str], pending: dict) -> bool:
+    """Whether this sign-in is still the one in progress: no later connect has taken its place, and
+    its server is still there."""
     with _SIGNIN_LOCK:
-        if _PENDING_SIGNINS.get(key) is pending:
+        return _PENDING_SIGNINS.get(key) is pending
+
+
+def _keep_signin(key: tuple[str, str, str], pending: dict, store, token: dict) -> None:
+    """Keeps the tokens a sign-in ended with, under the person who started it, only while it is still
+    the one in progress. A later connect of theirs may have taken its place, or its server may be
+    gone, perhaps with another one added under its name: then nothing is kept (OAuthError "closed").
+    The check and the write are one step under the lock that connect and remove-server take to close
+    a sign-in, so neither comes in between."""
+    swarm, server, person = key
+    with _SIGNIN_LOCK:
+        if _PENDING_SIGNINS.get(key) is not pending:
+            raise oauth_mod.OAuthError("closed", "the sign-in was closed while it finished: a later connect took "
+                                                 "its place, or its server was removed")
+        # Close the old session before the new token is visible, so a call made with the new token
+        # never lands on a session that is being closed.
+        ENGINE.forget(swarm, server)
+        store.put_credentials(server, person, {**token, "person": person})
+
+
+def _signin_over(key: tuple[str, str, str], pending: dict) -> None:
+    with _SIGNIN_LOCK:
+        if _PENDING_SIGNINS.get(key) is pending:  # not a later connect's
             _PENDING_SIGNINS.pop(key)
-    store.trace({"action": "connect", "server": record["name"], "tool": None, "actor": actor, "status": "done"})
-    account = engine_mod.clean_text(token.get("account"), 120)
-    return _result("done", f"signed in to '{record['name']}'" + (f" as {account}" if account else ""))
+
+
+def _browser_signin(swarm, store, record, person, actor):
+    """connect with flow browser (RFC 8252, 7.3). The app listens on a free port of the loopback
+    interface of the hive's machine, the person signs in at the address in the result, and their
+    browser comes back to http://localhost:<port> with a code, which the app trades for the tokens it
+    keeps under that person. As with the device code, the sign-in completes on its own: here in a
+    thread of the listener, which closes when the wait ends, whichever way."""
+    auth, key = record["auth"], (swarm, record["name"], person)
+    listener = oauth_mod.LoopbackListener()
+    signin = oauth_mod.start_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"], listener.redirect_uri)
+    pending = {"by": person, "listener": listener}  # the address goes only to this person, in the result below
+
+    def trace(failure: BaseException | None = None, code: str | None = None) -> None:
+        entry = {"action": "connect", "server": record["name"], "tool": None, "actor": actor, "status": "done"}
+        if failure is not None:
+            # The identity platform's own words, or only the type of an error that is not its own;
+            # never the code, nor what the address of the sign-in carries.
+            reason = engine_mod.clean_text(getattr(failure, "message", failure.__class__.__name__), 200)
+            hidden = tuple(value for value in (code, signin.state, signin.verifier) if value)
+            entry.update(status="error", reason=engine_mod.redact(reason, hidden))
+        store.trace(entry)
+
+    def landed(code: str | None, failure) -> bool:
+        """The browser came back with this sign-in's state: with a code, or with the failure that the
+        identity platform sent in its place. True once the person is signed in."""
+        try:
+            if failure is not None:
+                raise failure
+            # The identity provider is called here, in a thread of the listener: the hive's event loop keeps running.
+            token = oauth_mod.finish_browser_flow(auth["tenant"], auth["client_id"], auth["scopes"], signin, code)
+            _keep_signin(key, pending, store, token)
+            trace()
+            return True
+        except Exception as exc:
+            trace(exc, code)
+            return False
+        finally:
+            _signin_over(key, pending)
+
+    def ended(failure) -> None:
+        """Nobody finished the sign-in in time, or the listener gave up."""
+        try:
+            trace(failure)
+        finally:
+            _signin_over(key, pending)
+
+    # The listener starts before the sign-in is registered: until the result below is out, nobody has
+    # the address that could bring a browser to it.
+    listener.start(signin.state, landed, ended, oauth_mod.BROWSER_SIGNIN_SECONDS)
+    _signin_started(key, pending)
+    # What to do comes first and the address last: a hive page also shows the message in a notice, which cuts a
+    # long address short. The address stays in the message, the one field the contract promises to show the person.
+    return _result("done", "Open the sign-in address in a browser on the hive's machine and sign in, within "
+                           f"{oauth_mod.BROWSER_SIGNIN_SECONDS // 60} minutes. The connection completes on its own "
+                           f"once you have. The address: {signin.url}",
+                   detail={"authorization_url": signin.url, "redirect_uri": signin.redirect_uri,
+                           "expires_in": oauth_mod.BROWSER_SIGNIN_SECONDS})
 
 
 def _revoke(ctx, swarm, store, items, params):
